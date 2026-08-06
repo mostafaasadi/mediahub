@@ -77,7 +77,72 @@ pip install -r requirements.txt
 ```bash
 python main.py
 ```
+---
 
+## ⚡ Quick Launch (Shell Alias)
+
+If you use this app frequently, you can add a shell alias to launch it with a single short command from anywhere.
+
+### Linux / macOS
+
+Add this line to your `~/.bashrc`, `~/.zshrc`, or `~/.profile`:
+
+```bash
+alias mediahub="cd /path/to/mediahub && source .venv/bin/activate && python main.py"
+```
+
+Replace `/path/to/mediahub` with the actual path where you cloned the repository. For example:
+
+```bash
+alias mediahub="cd ~/projects/mediahub && source .venv/bin/activate && python main.py"
+```
+
+Then reload your shell config:
+
+```bash
+source ~/.bashrc
+```
+
+Now you can simply type:
+
+```bash
+mediahub
+```
+
+### Windows (PowerShell)
+
+Open your PowerShell profile:
+
+```powershell
+notepad $PROFILE
+```
+
+Add this function:
+
+```powershell
+function mediahub {
+    Set-Location "C:\path\to\mediahub"
+    & ".venv\Scripts\Activate.ps1"
+    python main.py
+}
+```
+
+Replace the path with your actual project location, save the file, and restart PowerShell. Then just run:
+
+```powershell
+mediahub
+```
+
+### Windows (Batch File)
+
+Alternatively, create a file called `mediahub.bat` anywhere in your `PATH`:
+
+```bat
+@echo off
+cd /d C:\path\to\mediahub
+call .venv\Scripts\activate.bat
+python main.py
+```
 ---
 
 ## ⚙️ Configuration
