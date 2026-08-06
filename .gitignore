@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# App data - IMPORTANT: never commit your database
+media_hub.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Build
+build/
+dist/
+*.spec
