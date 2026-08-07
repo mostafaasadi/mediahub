@@ -2,6 +2,7 @@ import json
 import os
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import flet as ft
@@ -62,24 +63,19 @@ def parse_int(value):
 def parse_season_episode(filename):
     if not filename:
         return None
-
     match = re.search(
         r"[Ss](\d{1,2})\s*[Ee](\d{1,2})",
         filename,
     )
-
     if match:
         season = int(match.group(1))
         episode = int(match.group(2))
         return f"S{season:02d} E{episode:02d}"
-
     match = re.search(r"(\d{1,2})x(\d{1,2})", filename)
-
     if match:
         season = int(match.group(1))
         episode = int(match.group(2))
         return f"S{season:02d} E{episode:02d}"
-
     return None
 
 
@@ -89,39 +85,30 @@ def parse_option_label(label):
         label or "",
         re.IGNORECASE,
     )
-
     if match:
         return parse_int(match.group(1)), match.group(2).strip()
-
     return None, None
 
 
 def normalize_links(media_type, links):
     options = []
-
     if not isinstance(links, dict):
         return options
-
     if media_type == "movie":
         for items in links.values():
             if not isinstance(items, list):
                 continue
-
             for item in items:
                 if not isinstance(item, dict):
                     continue
-
                 if not item.get("file"):
                     continue
-
                 quality = str(item.get("quality") or "File")
                 version = str(item.get("version") or "")
-
                 if version:
                     label = f"{quality} - {version}"
                 else:
                     label = quality
-
                 options.append(
                     {
                         "kind": "file",
@@ -131,28 +118,21 @@ def normalize_links(media_type, links):
                         "version": version,
                     }
                 )
-
         return options
-
     for season_dict in links.values():
         if not isinstance(season_dict, dict):
             continue
-
         for season_key, items in season_dict.items():
             if not isinstance(items, list):
                 continue
-
             for item in items:
                 if not isinstance(item, dict):
                     continue
-
                 if not item.get("folder"):
                     continue
-
                 season = parse_int(item.get("season", season_key))
                 quality = str(item.get("quality") or "Quality")
                 label = f"Season {season} - {quality}"
-
                 options.append(
                     {
                         "kind": "folder",
@@ -162,32 +142,25 @@ def normalize_links(media_type, links):
                         "quality": quality,
                     }
                 )
-
     options.sort(
         key=lambda opt: (
             opt.get("season", 0),
             opt.get("quality", ""),
         )
     )
-
     return options
 
 
 def format_bytes(num):
     if num <= 0:
         return ""
-
     value = float(num)
-
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if value < 1024 or unit == "TB":
             if unit == "B":
                 return f"{int(value)}B"
-
             return f"{value:.1f}{unit}"
-
         value /= 1024.0
-
     return f"{value:.1f}PB"
 
 
@@ -216,7 +189,6 @@ class ModernMediaCard(ft.Container):
         progress_seconds = float(data.get("progress_seconds") or 0.0)
         duration = float(data.get("progress_duration") or 0.0)
         progress_percent = 0.0
-
         if is_history and progress_seconds > 0:
             if duration > 0:
                 progress_percent = min(progress_seconds / duration, 1.0)
@@ -224,21 +196,26 @@ class ModernMediaCard(ft.Container):
                 progress_percent = min(progress_seconds / 5400.0, 0.95)
 
         completed = is_history and progress_percent >= 0.95
+        up_next = False
+        if (
+            completed
+            and media_type == "series"
+            and not data.get("_series_finished", True)
+        ):
+            completed = False
+            up_next = True
 
         se_label = None
-
         if is_history and media_type == "series":
             se_label = parse_season_episode(
                 data.get("last_episode_filename", "")
             )
 
         fill_w = 0
-
         if is_history and progress_seconds > 0 and progress_percent > 0:
             fill_w = max(6, int(T.TRACK_W * progress_percent))
 
         percent_int = int(progress_percent * 100)
-
         if progress_seconds > 0 and percent_int < 1:
             percent_label = "<1%"
         else:
@@ -348,7 +325,6 @@ class ModernMediaCard(ft.Container):
         if is_history:
             browse_icon = ft.Icons.VIDEO_LIBRARY_OUTLINED
             browse_tip = "Browse"
-
             if media_type == "movie":
                 browse_icon = ft.Icons.TUNE_ROUNDED
                 browse_tip = "Quality options"
@@ -374,27 +350,27 @@ class ModernMediaCard(ft.Container):
                 ),
             )
 
-        if is_history and media_type == "series":
-            self.next_btn = ft.Container(
-                width=24,
-                height=24,
-                border_radius=12,
-                bgcolor="#1AFFFFFF",
-                alignment=ft.Alignment(0, 0),
-                content=ft.Icon(
-                    ft.Icons.SKIP_NEXT_ROUNDED,
-                    size=14,
-                    color=T.TEXT,
-                ),
-                tooltip="Next Episode",
-                ink=True,
-                on_click=self._on_next_click,
-                scale=1.0,
-                animate_scale=ft.Animation(
-                    180,
-                    ft.AnimationCurve.EASE_OUT,
-                ),
-            )
+            if media_type == "series":
+                self.next_btn = ft.Container(
+                    width=24,
+                    height=24,
+                    border_radius=12,
+                    bgcolor="#1AFFFFFF",
+                    alignment=ft.Alignment(0, 0),
+                    content=ft.Icon(
+                        ft.Icons.SKIP_NEXT_ROUNDED,
+                        size=14,
+                        color=T.TEXT,
+                    ),
+                    tooltip="Next Episode",
+                    ink=True,
+                    on_click=self._on_next_click,
+                    scale=1.0,
+                    animate_scale=ft.Animation(
+                        180,
+                        ft.AnimationCurve.EASE_OUT,
+                    ),
+                )
 
         meta_children = [
             ft.Text(
@@ -425,7 +401,6 @@ class ModernMediaCard(ft.Container):
 
         if self.browse_btn:
             meta_children.append(self.browse_btn)
-
         if self.next_btn:
             meta_children.append(self.next_btn)
 
@@ -456,6 +431,27 @@ class ModernMediaCard(ft.Container):
             pill_bg = T.WATCHED_SOFT
             pill_border = T.WATCHED_GLOW
             state_color = T.WATCHED
+        elif up_next:
+            pill_content = ft.Row(
+                [
+                    ft.Icon(
+                        ft.Icons.SKIP_NEXT_ROUNDED,
+                        size=10,
+                        color=T.ACCENT_HOVER,
+                    ),
+                    ft.Text(
+                        "Up Next",
+                        size=9,
+                        weight="700",
+                        color=T.ACCENT_HOVER,
+                    ),
+                ],
+                spacing=3,
+                tight=True,
+            )
+            pill_bg = T.ACCENT_SOFT
+            pill_border = T.ACCENT_GLOW
+            state_color = T.ACCENT_2
         else:
             pill_content = ft.Text(
                 percent_label,
@@ -501,7 +497,6 @@ class ModernMediaCard(ft.Container):
         )
 
         dot = None
-
         if fill_w > 0:
             dot = ft.Container(
                 left=min(max(0, fill_w - 4), T.TRACK_W - 7),
@@ -619,18 +614,14 @@ class ModernMediaCard(ft.Container):
         self.hover_scrim.opacity = 1 if on else 0
         self.play_circle.opacity = 1 if on else 0
         self.play_circle.scale = 1.0 if on else 0.85
-
         if self.browse_btn:
             self.browse_btn.scale = 1.12 if on else 1.0
             self.browse_btn.update()
-
         if self.next_btn:
             self.next_btn.scale = 1.12 if on else 1.0
             self.next_btn.update()
-
         self.hover_scrim.update()
         self.play_circle.update()
-
         if on:
             self.shadow = ft.BoxShadow(
                 blur_radius=28,
@@ -642,7 +633,6 @@ class ModernMediaCard(ft.Container):
                 blur_radius=0,
                 color="#00000000",
             )
-
         self.update()
 
     def _on_card_click(self, e):
@@ -652,7 +642,6 @@ class ModernMediaCard(ft.Container):
             self.is_history,
             self.data.get("title_en"),
         )
-
         if self.on_click_callback:
             self.on_click_callback(self.data, self.is_history)
 
@@ -662,7 +651,6 @@ class ModernMediaCard(ft.Container):
             self.data.get("imdb_id"),
             self.data.get("title_en"),
         )
-
         if self.on_click_callback:
             self.on_click_callback(
                 self.data,
@@ -676,7 +664,6 @@ class ModernMediaCard(ft.Container):
             self.data.get("imdb_id"),
             self.data.get("title_en"),
         )
-
         if self.on_click_callback:
             self.on_click_callback(
                 self.data,
@@ -693,6 +680,7 @@ class MediaHubApp:
         self.player.on_error = lambda msg: self._show_snackbar(msg)
         self.poster_manager = PosterManager(self.db)
         self._size_cache = {}
+        self._episodes_cache = {}
 
         self.page.title = "Media Hub"
         self.page.theme_mode = "dark"
@@ -716,9 +704,11 @@ class MediaHubApp:
         self.page.scroll = "auto"
         self.page.window_width = 1200
         self.page.window_height = 800
+
         self.resize_timer = None
         self._page_width = None
         self._poster_cache = {}
+
         self._set_window_icon()
 
         self.search_timer = None
@@ -730,7 +720,6 @@ class MediaHubApp:
     def _set_window_icon(self):
         if not os.path.exists(ICON_PATH):
             return
-
         try:
             self.page.window.icon = ICON_PATH
         except Exception:
@@ -741,28 +730,22 @@ class MediaHubApp:
 
     def _cached_poster(self, media):
         imdb_id = media.get("imdb_id", "")
-
         if not imdb_id:
             return ""
-
         return self._poster_cache.get(imdb_id, "")
 
     def _cards_per_row(self):
         width = self._page_width
-
         if not width:
             width = getattr(self.page, "window_width", 1200)
-
         if not width:
             width = 1200
-
         available = width - 80
         return max(1, int((available + 15) // (T.CARD_W + 15)))
 
     def _wrap_cards(self, cards):
         per_row = self._cards_per_row()
         rows = []
-
         for i in range(0, len(cards), per_row):
             rows.append(
                 ft.Row(
@@ -770,15 +753,12 @@ class MediaHubApp:
                     spacing=15,
                 )
             )
-
         return rows
 
     def _on_page_resize(self, e):
         self._page_width = getattr(e, "width", None)
-
         if self.resize_timer:
             self.resize_timer.cancel()
-
         self.resize_timer = threading.Timer(
             0.3,
             lambda: self.page.run_thread(
@@ -788,8 +768,89 @@ class MediaHubApp:
         )
         self.resize_timer.start()
 
+    def _get_all_history(self):
+        try:
+            conn = self.db._get_conn()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM history ORDER BY timestamp DESC"
+            )
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(row) for row in rows]
+        except Exception:
+            return []
+
+    def _get_cached_episodes(self, folder_url):
+        if not folder_url:
+            return None
+        now = time.time()
+        cached = self._episodes_cache.get(folder_url)
+        if cached and now - cached[0] < 1800:
+            return cached[1]
+        episodes = self._fetch_episodes(folder_url)
+        if episodes is not None:
+            self._episodes_cache[folder_url] = (now, episodes)
+        return episodes
+
+    def _series_finished(self, item):
+        options = self._get_catalog_options(
+            item.get("imdb_id", ""),
+            "series",
+        )
+        current = None
+        latest_season = None
+        if options:
+            current = self._get_current_option(item, options)
+            latest_season = max(
+                parse_int(opt.get("season")) for opt in options
+            )
+
+        last_season, quality = parse_option_label(
+            item.get("last_option_label")
+        )
+        if last_season is None and current:
+            last_season = parse_int(current.get("season")) or None
+
+        if last_season is not None and latest_season is not None:
+            if last_season < latest_season:
+                return False
+            if last_season > latest_season:
+                return True
+
+        target = current
+        if target is None and options and latest_season is not None:
+            same = [
+                opt
+                for opt in options
+                if parse_int(opt.get("season")) == latest_season
+            ]
+            if quality:
+                for opt in same:
+                    if opt.get("quality") == quality:
+                        target = opt
+                        break
+            if target is None and same:
+                target = same[0]
+        if target is None:
+            return True
+
+        episodes = self._get_cached_episodes(target.get("url", ""))
+        if not episodes:
+            return True
+        episodes = self._sort_episodes(episodes)
+        final = episodes[-1]
+        last_fn = item.get("last_episode_filename", "")
+        last_url = item.get("last_episode_url", "")
+        return (
+            final.get("filename") == last_fn
+            or final.get("url") == last_url
+        )
+
     def _build_ui(self):
         self.continue_wrap = ft.Column(spacing=18)
+        self.watched_series_wrap = ft.Column(spacing=18)
+        self.watched_movies_wrap = ft.Column(spacing=18)
         self.library_wrap = ft.Column(spacing=18)
 
         self.search_clear_btn = ft.Container(
@@ -822,7 +883,6 @@ class MediaHubApp:
             color=T.TEXT,
             hint_style=ft.TextStyle(color=T.DIM, size=13),
         )
-
         self.search_field.suffix = self.search_clear_btn
 
         self.settings_btn = ft.IconButton(
@@ -874,6 +934,40 @@ class MediaHubApp:
             visible=True,
         )
 
+        self.watched_series_section = ft.Container(
+            content=ft.Column(
+                [
+                    self._section_header("Watched Series"),
+                    self.watched_series_wrap,
+                ],
+                spacing=14,
+            ),
+            padding=ft.Padding(
+                left=40,
+                top=28,
+                right=40,
+                bottom=10,
+            ),
+            visible=False,
+        )
+
+        self.watched_movies_section = ft.Container(
+            content=ft.Column(
+                [
+                    self._section_header("Watched Movies"),
+                    self.watched_movies_wrap,
+                ],
+                spacing=14,
+            ),
+            padding=ft.Padding(
+                left=40,
+                top=28,
+                right=40,
+                bottom=10,
+            ),
+            visible=False,
+        )
+
         self.library_section = ft.Container(
             content=ft.Column(
                 [
@@ -897,7 +991,12 @@ class MediaHubApp:
             right=0,
             bottom=0,
             content=ft.Column(
-                [self.continue_section, self.library_section],
+                [
+                    self.continue_section,
+                    self.watched_series_section,
+                    self.watched_movies_section,
+                    self.library_section,
+                ],
                 spacing=0,
                 scroll="auto",
                 expand=True,
@@ -936,23 +1035,18 @@ class MediaHubApp:
 
     def _sheet_height(self, minimum=520):
         height = getattr(self.page, "window_height", 800)
-
         if not height:
             height = 800
-
         return max(minimum, int(height - 130))
 
     def _sheet_width(self, minimum=800):
         width = getattr(self.page, "window_width", 1200)
-
         if not width:
             width = 1200
-
         return max(minimum, min(1200, int(width * 0.8)))
 
     def _open_settings(self, e):
         logger.info("settings opened")
-
         current_url = self.db.get_js_url()
         current_api_key = self.db.get_omdb_api_key()
 
@@ -1072,34 +1166,27 @@ class MediaHubApp:
 
     def _clear_search(self, e=None):
         logger.info("search cleared")
-
         if self.search_timer:
             self.search_timer.cancel()
             self.search_timer = None
-
         self.search_field.value = ""
         self.last_search_query = ""
-
         self._set_clear_button_visible(False)
-
         try:
             self.search_field.update()
         except Exception:
             pass
-
         self._refresh_ui("")
 
     def _close_settings(self):
         if hasattr(self, "settings_sheet"):
             self.settings_sheet.open = False
-
         self.page.update()
 
     def _close_bottom_sheets(self):
         for overlay in list(self.page.overlay):
             if isinstance(overlay, ft.BottomSheet):
                 overlay.open = False
-
         self.page.update()
 
     def _sync_and_close_settings(self, e):
@@ -1110,7 +1197,6 @@ class MediaHubApp:
     def _save_settings(self, e):
         new_url = self.url_input.value.strip()
         new_api_key = self.api_key_input.value.strip()
-
         logger.info("save settings clicked: url=%s", new_url)
 
         if not new_url:
@@ -1146,7 +1232,6 @@ class MediaHubApp:
 
     def _sync_db(self, _, force_url: str = None):
         logger.info("sync started")
-
         self.page.overlay.append(
             ft.ProgressBar(
                 color=T.ACCENT,
@@ -1154,7 +1239,6 @@ class MediaHubApp:
             )
         )
         self.page.update()
-
         threading.Thread(
             target=self._sync_task,
             args=(force_url,),
@@ -1176,7 +1260,6 @@ class MediaHubApp:
             for item in self.page.overlay
             if isinstance(item, ft.ProgressBar)
         ]
-
         for bar in progress_bars:
             self.page.overlay.remove(bar)
 
@@ -1187,12 +1270,10 @@ class MediaHubApp:
             self._show_snackbar(
                 "Sync failed. Check connection and URL."
             )
-
         self.page.update()
 
     def _show_snackbar(self, message: str):
         logger.info("snackbar: %s", message)
-
         snack = ft.SnackBar(
             content=ft.Text(message, size=13, color=T.TEXT),
             bgcolor=T.SURFACE_2,
@@ -1200,7 +1281,6 @@ class MediaHubApp:
             margin=18,
             shape=ft.RoundedRectangleBorder(radius=10),
         )
-
         self.page.overlay.append(snack)
         snack.open = True
         self.page.update()
@@ -1208,12 +1288,9 @@ class MediaHubApp:
     def _on_search_change(self, e):
         raw_value = e.control.value or ""
         query = raw_value.strip()
-
         self._set_clear_button_visible(bool(raw_value))
-
         if self.search_timer:
             self.search_timer.cancel()
-
         self.search_timer = threading.Timer(
             0.5,
             lambda: self._perform_search(query),
@@ -1223,12 +1300,9 @@ class MediaHubApp:
     def _set_clear_button_visible(self, visible: bool):
         if not hasattr(self, "search_clear_btn"):
             return
-
         if self.search_clear_btn.visible == visible:
             return
-
         self.search_clear_btn.visible = visible
-
         try:
             self.search_clear_btn.update()
         except Exception:
@@ -1240,7 +1314,6 @@ class MediaHubApp:
     def _perform_search(self, query: str):
         if query == self.last_search_query:
             return
-
         self.last_search_query = query
         logger.info("search: %r", query)
         self.page.run_thread(self._refresh_ui, query)
@@ -1248,11 +1321,13 @@ class MediaHubApp:
     def _refresh_ui(self, query: str):
         if query:
             self.continue_section.visible = False
+            self.watched_series_section.visible = False
+            self.watched_movies_section.visible = False
             self.library_section.visible = True
+
             self.library_wrap.controls.clear()
 
             movies = self.db.search(query)
-
             logger.info(
                 "search results: %s items for %r",
                 len(movies),
@@ -1260,7 +1335,6 @@ class MediaHubApp:
             )
 
             cards = []
-
             for movie in movies:
                 cards.append(
                     ModernMediaCard(
@@ -1275,24 +1349,24 @@ class MediaHubApp:
             self._load_posters_async(cards)
             return
 
-        self.continue_section.visible = True
         self.library_section.visible = False
         self.continue_wrap.controls.clear()
+        self.watched_series_wrap.controls.clear()
+        self.watched_movies_wrap.controls.clear()
 
-        history = self.db.get_continue_watching()
-
-        logger.info("continue watching: %s items", len(history))
+        history = self._get_all_history()
+        logger.info("all history: %s items", len(history))
 
         if not history:
+            self.continue_section.visible = True
+            self.watched_series_section.visible = False
+            self.watched_movies_section.visible = False
             self.continue_wrap.controls = [self._empty_state()]
             self.page.update()
             return
 
-        cards = []
-
         for item in history:
             ep_url = item.get("last_episode_url", "")
-
             if ep_url:
                 item["progress_seconds"] = self.db.get_progress(
                     ep_url
@@ -1304,26 +1378,104 @@ class MediaHubApp:
                 item["progress_seconds"] = 0.0
                 item["progress_duration"] = 0.0
 
-            logger.debug(
-                "history item: imdb=%s title=%s progress=%s/%s",
-                item.get("imdb_id"),
-                item.get("title_en"),
-                item.get("progress_seconds"),
-                item.get("progress_duration"),
+            progress_seconds = float(
+                item["progress_seconds"] or 0.0
             )
+            duration = float(item["progress_duration"] or 0.0)
+            progress_percent = 0.0
+            if progress_seconds > 0:
+                if duration > 0:
+                    progress_percent = min(
+                        progress_seconds / duration, 1.0
+                    )
+                else:
+                    progress_percent = min(
+                        progress_seconds / 5400.0, 0.95
+                    )
+            item["_percent"] = progress_percent
 
-            cards.append(
-                ModernMediaCard(
+        pending_series = []
+        for item in history:
+            if item["_percent"] >= 0.95:
+                if item.get("media_type", "movie") == "series":
+                    pending_series.append(item)
+                else:
+                    item["_section"] = "movies"
+            else:
+                item["_section"] = "continue"
+
+        if pending_series:
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                flags = list(
+                    executor.map(
+                        self._series_finished,
+                        pending_series,
+                    )
+                )
+            for item, finished in zip(pending_series, flags):
+                item["_series_finished"] = finished
+                item["_section"] = (
+                    "series" if finished else "continue"
+                )
+
+        continue_items = []
+        series_items = []
+        movie_items = []
+        for item in history:
+            section = item.get("_section", "continue")
+            if section == "series":
+                series_items.append(item)
+            elif section == "movies":
+                movie_items.append(item)
+            else:
+                continue_items.append(item)
+
+        all_cards = []
+
+        self.continue_section.visible = bool(continue_items)
+        if continue_items:
+            cards = []
+            for item in continue_items:
+                card = ModernMediaCard(
                     item,
                     is_history=True,
                     on_click_callback=self._handle_card_click,
                     poster_url=self._cached_poster(item),
                 )
-            )
+                cards.append(card)
+                all_cards.append(card)
+            self.continue_wrap.controls = self._wrap_cards(cards)
 
-        self.continue_wrap.controls = self._wrap_cards(cards)
+        self.watched_series_section.visible = bool(series_items)
+        if series_items:
+            cards = []
+            for item in series_items:
+                card = ModernMediaCard(
+                    item,
+                    is_history=True,
+                    on_click_callback=self._handle_card_click,
+                    poster_url=self._cached_poster(item),
+                )
+                cards.append(card)
+                all_cards.append(card)
+            self.watched_series_wrap.controls = self._wrap_cards(cards)
+
+        self.watched_movies_section.visible = bool(movie_items)
+        if movie_items:
+            cards = []
+            for item in movie_items:
+                card = ModernMediaCard(
+                    item,
+                    is_history=True,
+                    on_click_callback=self._handle_card_click,
+                    poster_url=self._cached_poster(item),
+                )
+                cards.append(card)
+                all_cards.append(card)
+            self.watched_movies_wrap.controls = self._wrap_cards(cards)
+
         self.page.update()
-        self._load_posters_async(cards)
+        self._load_posters_async(all_cards)
 
     def _empty_state(self):
         return ft.Container(
@@ -1350,10 +1502,8 @@ class MediaHubApp:
 
     def _load_posters_async(self, cards: list):
         pending = [card for card in cards if not card.poster_url]
-
         if not pending:
             return
-
         logger.debug("loading posters for %s cards", len(pending))
 
         def fetch(card):
@@ -1363,14 +1513,11 @@ class MediaHubApp:
         def task():
             with ThreadPoolExecutor(max_workers=4) as executor:
                 results = list(executor.map(fetch, pending))
-
             for card, poster_url in results:
                 if not poster_url:
                     continue
-
                 imdb_id = card.data.get("imdb_id", "")
                 self._poster_cache[imdb_id] = poster_url
-
                 try:
                     card.poster_url = poster_url
                     card.poster_img.src = poster_url
@@ -1399,34 +1546,26 @@ class MediaHubApp:
         try:
             base = folder_url.rstrip("/") + "/"
             logger.info("fetching episodes from: %s", base)
-
             session = DatabaseManager._get_robust_session()
             res = session.get(base, timeout=15)
-
             logger.debug(
                 "fetch episodes: HTTP %s content_len=%s",
                 res.status_code,
                 len(res.text),
             )
-
             res.raise_for_status()
-
             soup = BeautifulSoup(res.text, "html.parser")
             episodes = []
-
             for a in soup.find_all("a"):
                 href = a.get("href", "")
-
                 if not href.lower().endswith(
                     (".mkv", ".mp4", ".avi")
                 ):
                     continue
-
                 if href.startswith("http"):
                     url = href
                 else:
                     url = base + href.lstrip("/")
-
                 episodes.append(
                     {
                         "filename": a.text,
@@ -1434,7 +1573,6 @@ class MediaHubApp:
                         "size": self._extract_size(a),
                     }
                 )
-
             logger.info("found %s episode links", len(episodes))
             return episodes
         except Exception:
@@ -1443,32 +1581,24 @@ class MediaHubApp:
 
     def _extract_size(self, a_tag):
         sibling = a_tag.next_sibling
-
         if sibling is not None and isinstance(sibling, str):
             match = SIZE_PATTERN.search(sibling)
-
             if match:
                 return match.group(0).strip()
-
         row = a_tag.find_parent("tr")
-
         if row is not None:
             match = SIZE_PATTERN.search(row.get_text(" "))
-
             if match:
                 return match.group(0).strip()
-
         return ""
 
     def _sort_episodes(self, episodes):
         def key(ep):
             filename = ep.get("filename", "")
-
             match = re.search(
                 r"[Ss](\d{1,2})\s*[Ee](\d{1,2})",
                 filename,
             )
-
             if match:
                 return (
                     0,
@@ -1476,9 +1606,7 @@ class MediaHubApp:
                     int(match.group(2)),
                     filename,
                 )
-
             match = re.search(r"(\d{1,2})x(\d{1,2})", filename)
-
             if match:
                 return (
                     0,
@@ -1486,7 +1614,6 @@ class MediaHubApp:
                     int(match.group(2)),
                     filename,
                 )
-
             return (1, 0, 0, filename)
 
         return sorted(episodes, key=key)
@@ -1494,14 +1621,11 @@ class MediaHubApp:
     def _find_episode_index(self, episodes, history_item):
         current_ep = history_item.get("last_episode_filename", "")
         current_url = history_item.get("last_episode_url", "")
-
         for idx, ep in enumerate(episodes):
             if ep.get("filename") == current_ep:
                 return idx
-
             if ep.get("url") == current_url:
                 return idx
-
         return -1
 
     def _get_movie_by_imdb(self, imdb_id):
@@ -1521,37 +1645,28 @@ class MediaHubApp:
     def _get_catalog_options(self, imdb_id, media_type):
         if not imdb_id:
             return []
-
         movie = self._get_movie_by_imdb(imdb_id)
-
         if not movie:
             return []
-
         try:
             links = json.loads(movie.get("links", "{}"))
         except Exception:
             links = {}
-
         catalog_type = movie.get("type", media_type)
         return normalize_links(catalog_type, links)
 
     def _get_current_option(self, item, options):
         folder_url = item.get("last_folder_url", "")
         label = item.get("last_option_label", "")
-
         for opt in options:
             if opt.get("kind") != "folder":
                 continue
-
             if folder_url and opt.get("url") == folder_url:
                 return opt
-
             if label and opt.get("label") == label:
                 return opt
-
         if folder_url:
             season, quality = parse_option_label(label)
-
             if season is not None:
                 return {
                     "kind": "folder",
@@ -1560,28 +1675,23 @@ class MediaHubApp:
                     "season": season,
                     "quality": quality or "",
                 }
-
         return None
 
     def _get_option_context(self, option, item):
         if option:
             return option.get("season"), option.get("quality")
-
         return parse_option_label(item.get("last_option_label", ""))
 
     def _get_start_time(self, item, url, filename=""):
         direct = self.db.get_progress(url)
-
         if direct > 0:
             return direct
 
         last_url = item.get("last_episode_url", "")
-
         if not last_url or last_url == url:
             return 0.0
 
         media_type = item.get("media_type", item.get("type"))
-
         if media_type == "movie":
             return self.db.get_progress(last_url)
 
@@ -1591,7 +1701,6 @@ class MediaHubApp:
         new_code = parse_season_episode(
             filename or os.path.basename(url)
         )
-
         if old_code and new_code and old_code == new_code:
             return self.db.get_progress(last_url)
 
@@ -1600,25 +1709,18 @@ class MediaHubApp:
     def _get_file_size(self, url, session=None):
         if not url:
             return ""
-
         cached = self._size_cache.get(url)
-
         if cached:
             return cached
-
         size = self._fetch_file_size(url, session)
-
         if size:
             self._size_cache[url] = size
-
         return size
 
     def _fetch_file_size(self, url, session=None):
         referer = url.rsplit("/", 1)[0] + "/"
-
         if session is None:
             session = DatabaseManager._get_robust_session()
-
         try:
             res = session.head(
                 url,
@@ -1627,7 +1729,6 @@ class MediaHubApp:
                 headers={"Referer": referer},
             )
             length = res.headers.get("Content-Length", "")
-
             if not length:
                 res = session.get(
                     url,
@@ -1637,10 +1738,8 @@ class MediaHubApp:
                 )
                 length = res.headers.get("Content-Length", "")
                 res.close()
-
             if not length:
                 return ""
-
             return format_bytes(int(length))
         except Exception:
             return ""
@@ -1654,15 +1753,11 @@ class MediaHubApp:
                 option.get("url", ""),
                 session,
             )
-
             if not size:
                 return
-
             parts = []
-
             if base:
                 parts.append(base)
-
             parts.append(size)
             subtitle.value = " • ".join(parts)
             subtitle.visible = True
@@ -1673,13 +1768,10 @@ class MediaHubApp:
 
     def _handle_next(self, history_item):
         media_type = history_item.get("media_type")
-
         if media_type != "series":
             self._open_browse(history_item)
             return
-
         self._show_snackbar("Finding next episode...")
-
         threading.Thread(
             target=self._smart_next_task,
             args=(history_item,),
@@ -1692,7 +1784,6 @@ class MediaHubApp:
         current = self._get_current_option(history_item, options)
 
         folder_url = history_item.get("last_folder_url", "")
-
         if current:
             folder_url = current.get("url", folder_url)
 
@@ -1704,7 +1795,6 @@ class MediaHubApp:
             return
 
         episodes = self._fetch_episodes(folder_url)
-
         if episodes is None:
             if options:
                 self._open_browse(history_item)
@@ -1715,7 +1805,6 @@ class MediaHubApp:
         episodes = self._sort_episodes(episodes)
 
         current_idx = -1
-
         if episodes:
             current_idx = self._find_episode_index(
                 episodes,
@@ -1731,7 +1820,6 @@ class MediaHubApp:
 
         if episodes and current_idx + 1 < len(episodes):
             option = current
-
             if not option:
                 option = {
                     "kind": "folder",
@@ -1743,7 +1831,6 @@ class MediaHubApp:
                     "season": None,
                     "quality": "",
                 }
-
             self._play_series_browse_episode(
                 history_item,
                 option,
@@ -1755,21 +1842,18 @@ class MediaHubApp:
             current,
             history_item,
         )
-        candidates = []
 
+        candidates = []
         if season is not None:
             for opt in options:
                 if opt.get("kind") != "folder":
                     continue
-
                 if parse_int(opt.get("season")) <= season:
                     continue
-
                 candidates.append(opt)
 
         def candidate_key(opt):
             same_quality = opt.get("quality") == quality
-
             return (
                 parse_int(opt.get("season")),
                 0 if same_quality else 1,
@@ -1780,12 +1864,9 @@ class MediaHubApp:
 
         for candidate in candidates:
             cand_eps = self._fetch_episodes(candidate.get("url", ""))
-
             if not cand_eps:
                 continue
-
             cand_eps = self._sort_episodes(cand_eps)
-
             self._play_series_browse_episode(
                 history_item,
                 candidate,
@@ -1869,16 +1950,13 @@ class MediaHubApp:
                 border_radius=ft.BorderRadius(18, 18, 0, 0),
             ),
         )
-
         self.page.overlay.append(sheet)
         sheet.open = True
         self.page.update()
 
     def _resume_history(self, history_item, start_zero=False):
         self._close_bottom_sheets()
-
         url = history_item.get("last_episode_url", "")
-
         if not url:
             self._show_snackbar("No playable item found.")
             return
@@ -1900,7 +1978,6 @@ class MediaHubApp:
 
     def _open_browse(self, history_item):
         media_type = history_item.get("media_type", "movie")
-
         options = self._get_catalog_options(
             history_item.get("imdb_id", ""),
             media_type,
@@ -1927,7 +2004,6 @@ class MediaHubApp:
             is_current = opt.get("url") == current_url
             title_weight = "700" if is_current else "400"
             title_color = T.ACCENT_2 if is_current else T.TEXT
-
             if is_current:
                 leading_icon = ft.Icons.PLAY_ARROW_ROUNDED
             else:
@@ -2015,9 +2091,7 @@ class MediaHubApp:
 
     def _play_movie_browse_option(self, history_item, option):
         self._close_bottom_sheets()
-
         url = option.get("url", "")
-
         if not url:
             self._show_snackbar("No stream URL found.")
             return
@@ -2054,12 +2128,9 @@ class MediaHubApp:
         for opt in options:
             if opt.get("kind") != "folder":
                 continue
-
             label = opt.get("label", "")
-
             if not label:
                 continue
-
             if label not in label_to_option:
                 label_to_option[label] = opt
                 option_order.append(label)
@@ -2069,13 +2140,11 @@ class MediaHubApp:
             return
 
         current_label = history_item.get("last_option_label", "")
-
         if current_label not in label_to_option:
             current_option = self._get_current_option(
                 history_item,
                 options,
             )
-
             if current_option:
                 current_label = current_option.get("label", "")
 
@@ -2135,22 +2204,19 @@ class MediaHubApp:
             self.page.update()
 
             episodes = self._fetch_episodes(option.get("url", ""))
-
             if episodes is None:
                 set_message("Failed to load episodes.")
                 return
-
             if not episodes:
                 set_message("No episodes found.")
                 return
 
             episodes = self._sort_episodes(episodes)
             current_url = history_item.get("last_episode_url", "")
-            controls = []
 
+            controls = []
             for ep in episodes:
                 is_current = ep.get("url") == current_url
-
                 controls.append(
                     self._episode_list_tile(
                         history_item,
@@ -2165,36 +2231,29 @@ class MediaHubApp:
             self.page.update()
 
         def close_option_menu():
+            nonlocal menu_dialog
             if menu_dialog is None:
                 return
-
             menu_dialog.open = False
-
             try:
                 self.page.close(menu_dialog)
             except Exception:
                 pass
-
             self.page.update()
 
         def choose_option(label):
             close_option_menu()
             selector_label.value = label
             self.page.update()
-
             option = label_to_option.get(label)
-
             if option:
                 self.page.run_thread(load_option, option)
 
         def open_option_menu(e):
             nonlocal menu_dialog
-
             items = []
-
             for label in option_order:
                 is_active = label == selector_label.value
-
                 if is_active:
                     leading_icon = ft.Icons.CHECK_ROUNDED
                     title_color = T.ACCENT_2
@@ -2203,7 +2262,6 @@ class MediaHubApp:
                     leading_icon = ft.Icons.MOVIE_OUTLINED
                     title_color = T.TEXT
                     title_weight = "400"
-
                 items.append(
                     ft.ListTile(
                         title=ft.Text(
@@ -2303,7 +2361,6 @@ class MediaHubApp:
         self.page.update()
 
         initial_option = label_to_option.get(current_label)
-
         if initial_option:
             self.page.run_thread(load_option, initial_option)
 
@@ -2316,10 +2373,9 @@ class MediaHubApp:
     ):
         url = episode.get("url", "")
         prog = self.db.get_progress(url)
-
         parts = []
-        size = episode.get("size", "")
 
+        size = episode.get("size", "")
         if size:
             parts.append(size)
 
@@ -2327,7 +2383,6 @@ class MediaHubApp:
             parts.append(format_time(prog))
 
         subtitle = None
-
         if parts:
             subtitle = ft.Text(
                 " • ".join(parts),
@@ -2337,7 +2392,6 @@ class MediaHubApp:
 
         title_weight = "700" if is_current else "400"
         title_color = T.ACCENT_2 if is_current else T.TEXT
-
         if is_current:
             leading_icon = ft.Icons.PLAY_ARROW_ROUNDED
         else:
@@ -2370,10 +2424,8 @@ class MediaHubApp:
         episode,
     ):
         self._close_bottom_sheets()
-
         url = episode.get("url", "")
         filename = episode.get("filename", "")
-
         if not url:
             self._show_snackbar("No episode URL found.")
             return
@@ -2385,7 +2437,6 @@ class MediaHubApp:
         )
 
         folder_url = option.get("url", "")
-
         if not folder_url:
             folder_url = history_item.get("last_folder_url", "")
 
@@ -2413,13 +2464,11 @@ class MediaHubApp:
 
     def _show_current_folder_episodes(self, history_item):
         folder_url = history_item.get("last_folder_url", "")
-
         if not folder_url:
             self._show_snackbar("No folder URL found.")
             return
 
         self._show_snackbar("Loading episodes...")
-
         threading.Thread(
             target=self._load_current_folder_episodes,
             args=(history_item,),
@@ -2450,10 +2499,8 @@ class MediaHubApp:
 
         current_url = history_item.get("last_episode_url", "")
         controls = []
-
         for ep in episodes:
             is_current = ep.get("url") == current_url
-
             controls.append(
                 self._episode_list_tile(
                     history_item,
@@ -2538,7 +2585,6 @@ class MediaHubApp:
 
         for opt in options:
             is_folder = opt.get("kind") == "folder"
-
             if is_folder:
                 leading_icon = ft.Icons.FOLDER_OUTLINED
             else:
@@ -2613,7 +2659,6 @@ class MediaHubApp:
 
     def _play_media(self, media: dict, option: dict):
         self._close_bottom_sheets()
-
         target_url = option.get("url", "")
 
         logger.info(
@@ -2628,7 +2673,6 @@ class MediaHubApp:
             return
 
         start_time = self.db.get_progress(target_url)
-
         logger.info(
             "playing direct file: start=%s url=%s",
             start_time,
@@ -2666,9 +2710,7 @@ class MediaHubApp:
             media.get("title_en"),
             option.get("label"),
         )
-
         self._show_snackbar("Loading episodes...")
-
         threading.Thread(
             target=self._load_episode_picker,
             args=(media, option),
@@ -2687,7 +2729,6 @@ class MediaHubApp:
             return
 
         episodes = self._sort_episodes(episodes)
-
         logger.info(
             "episode picker loaded: %s episodes for %s",
             len(episodes),
@@ -2695,18 +2736,15 @@ class MediaHubApp:
         )
 
         ep_controls = []
-
         for ep in episodes:
             size = ep.get("size", "")
             subtitle = None
-
             if size:
                 subtitle = ft.Text(
                     size,
                     size=10,
                     color=T.DIM,
                 )
-
             ep_controls.append(
                 ft.ListTile(
                     title=ft.Text(
