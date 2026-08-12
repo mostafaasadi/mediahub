@@ -6,7 +6,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import flet as ft
-from bs4 import BeautifulSoup
 
 from backend import (
     DB_NAME,
@@ -15,6 +14,8 @@ from backend import (
     PosterManager,
     format_time,
     logger,
+    fetch_episodes_from_folder,
+    sort_episodes,
 )
 
 ICON_PATH = os.path.join(
@@ -76,6 +77,21 @@ def parse_season_episode(filename):
         season = int(match.group(1))
         episode = int(match.group(2))
         return f"S{season:02d} E{episode:02d}"
+    return None
+
+
+def parse_season_episode_tuple(filename):
+    if not filename:
+        return None
+    match = re.search(
+        r"[Ss](\d{1,2})\s*[Ee](\d{1,2})",
+        filename,
+    )
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    match = re.search(r"(\d{1,2})x(\d{1,2})", filename)
+    if match:
+        return int(match.group(1)), int(match.group(2))
     return None
 
 
@@ -788,64 +804,10 @@ class MediaHubApp:
         cached = self._episodes_cache.get(folder_url)
         if cached and now - cached[0] < 1800:
             return cached[1]
-        episodes = self._fetch_episodes(folder_url)
+        episodes = fetch_episodes_from_folder(folder_url)
         if episodes is not None:
             self._episodes_cache[folder_url] = (now, episodes)
         return episodes
-
-    def _series_finished(self, item):
-        options = self._get_catalog_options(
-            item.get("imdb_id", ""),
-            "series",
-        )
-        current = None
-        latest_season = None
-        if options:
-            current = self._get_current_option(item, options)
-            latest_season = max(
-                parse_int(opt.get("season")) for opt in options
-            )
-
-        last_season, quality = parse_option_label(
-            item.get("last_option_label")
-        )
-        if last_season is None and current:
-            last_season = parse_int(current.get("season")) or None
-
-        if last_season is not None and latest_season is not None:
-            if last_season < latest_season:
-                return False
-            if last_season > latest_season:
-                return True
-
-        target = current
-        if target is None and options and latest_season is not None:
-            same = [
-                opt
-                for opt in options
-                if parse_int(opt.get("season")) == latest_season
-            ]
-            if quality:
-                for opt in same:
-                    if opt.get("quality") == quality:
-                        target = opt
-                        break
-            if target is None and same:
-                target = same[0]
-        if target is None:
-            return True
-
-        episodes = self._get_cached_episodes(target.get("url", ""))
-        if not episodes:
-            return True
-        episodes = self._sort_episodes(episodes)
-        final = episodes[-1]
-        last_fn = item.get("last_episode_filename", "")
-        last_url = item.get("last_episode_url", "")
-        return (
-            final.get("filename") == last_fn
-            or final.get("url") == last_url
-        )
 
     def _build_ui(self):
         self.continue_wrap = ft.Column(spacing=18)
@@ -1405,18 +1367,16 @@ class MediaHubApp:
                 item["_section"] = "continue"
 
         if pending_series:
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                flags = list(
-                    executor.map(
-                        self._series_finished,
-                        pending_series,
-                    )
-                )
-            for item, finished in zip(pending_series, flags):
+            for item in pending_series:
+                folder_url = item.get("last_folder_url", "")
+                last_ep = item.get("last_episode_filename", "")
+                if folder_url and last_ep:
+                    cached_latest = self.db.get_cached_latest_episode(folder_url)
+                    finished = (cached_latest == last_ep) if cached_latest is not None else False
+                else:
+                    finished = True
                 item["_series_finished"] = finished
-                item["_section"] = (
-                    "series" if finished else "continue"
-                )
+                item["_section"] = "series" if finished else "continue"
 
         continue_items = []
         series_items = []
@@ -1542,43 +1502,6 @@ class MediaHubApp:
         else:
             self._open_media_details(data, is_history)
 
-    def _fetch_episodes(self, folder_url: str):
-        try:
-            base = folder_url.rstrip("/") + "/"
-            logger.info("fetching episodes from: %s", base)
-            session = DatabaseManager._get_robust_session()
-            res = session.get(base, timeout=15)
-            logger.debug(
-                "fetch episodes: HTTP %s content_len=%s",
-                res.status_code,
-                len(res.text),
-            )
-            res.raise_for_status()
-            soup = BeautifulSoup(res.text, "html.parser")
-            episodes = []
-            for a in soup.find_all("a"):
-                href = a.get("href", "")
-                if not href.lower().endswith(
-                    (".mkv", ".mp4", ".avi")
-                ):
-                    continue
-                if href.startswith("http"):
-                    url = href
-                else:
-                    url = base + href.lstrip("/")
-                episodes.append(
-                    {
-                        "filename": a.text,
-                        "url": url,
-                        "size": self._extract_size(a),
-                    }
-                )
-            logger.info("found %s episode links", len(episodes))
-            return episodes
-        except Exception:
-            logger.exception("fetch episodes failed: %s", folder_url)
-            return None
-
     def _extract_size(self, a_tag):
         sibling = a_tag.next_sibling
         if sibling is not None and isinstance(sibling, str):
@@ -1619,12 +1542,20 @@ class MediaHubApp:
         return sorted(episodes, key=key)
 
     def _find_episode_index(self, episodes, history_item):
-        current_ep = history_item.get("last_episode_filename", "")
-        current_url = history_item.get("last_episode_url", "")
+        current_ep = (history_item.get("last_episode_filename") or "").strip()
+        current_url = (history_item.get("last_episode_url") or "").strip()
+        current_se = parse_season_episode_tuple(current_ep) if current_ep else None
+
         for idx, ep in enumerate(episodes):
-            if ep.get("filename") == current_ep:
+            ep_filename = ep.get("filename", "").strip()
+            ep_url = ep.get("url", "").strip()
+            ep_se = parse_season_episode_tuple(ep_filename) if ep_filename else None
+
+            if current_url and ep_url == current_url:
                 return idx
-            if ep.get("url") == current_url:
+            if current_ep and ep_filename == current_ep:
+                return idx
+            if current_se and ep_se and current_se == ep_se:
                 return idx
         return -1
 
@@ -1794,7 +1725,7 @@ class MediaHubApp:
                 self._show_snackbar("No folder URL found.")
             return
 
-        episodes = self._fetch_episodes(folder_url)
+        episodes = fetch_episodes_from_folder(folder_url)
         if episodes is None:
             if options:
                 self._open_browse(history_item)
@@ -1802,47 +1733,60 @@ class MediaHubApp:
                 self._show_snackbar("Failed to load episodes.")
             return
 
-        episodes = self._sort_episodes(episodes)
-
-        current_idx = -1
-        if episodes:
-            current_idx = self._find_episode_index(
-                episodes,
-                history_item,
-            )
-
-        if episodes and current_idx < 0:
-            if options:
-                self._open_browse(history_item)
-            else:
-                self._show_current_folder_episodes(history_item)
+        episodes = sort_episodes(episodes)
+        if not episodes:
+            self._show_snackbar("No episodes found.")
             return
 
-        if episodes and current_idx + 1 < len(episodes):
+        # First, try to find current episode by index
+        current_idx = self._find_episode_index(episodes, history_item)
+        if current_idx != -1 and current_idx + 1 < len(episodes):
+            # Next episode exists in same folder
             option = current
             if not option:
                 option = {
                     "kind": "folder",
-                    "label": history_item.get(
-                        "last_option_label",
-                        "",
-                    ),
+                    "label": history_item.get("last_option_label", ""),
                     "url": folder_url,
                     "season": None,
                     "quality": "",
                 }
-            self._play_series_browse_episode(
-                history_item,
-                option,
-                episodes[current_idx + 1],
-            )
+            self._play_series_browse_episode(history_item, option, episodes[current_idx + 1])
             return
 
-        season, quality = self._get_option_context(
-            current,
-            history_item,
-        )
+        # If current episode not found or it's the last one, try by season/episode numbers
+        current_filename = (history_item.get("last_episode_filename") or "").strip()
+        current_se = parse_season_episode_tuple(current_filename)
+        next_idx = -1
+        if current_se is not None:
+            current_season, current_episode = current_se
+            # Find the first episode with season > current_season or same season but episode > current_episode
+            for idx, ep in enumerate(episodes):
+                ep_filename = ep.get("filename", "").strip()
+                ep_se = parse_season_episode_tuple(ep_filename)
+                if ep_se is None:
+                    continue
+                ep_season, ep_episode = ep_se
+                if ep_season > current_season or (ep_season == current_season and ep_episode > current_episode):
+                    next_idx = idx
+                    break
 
+            if next_idx != -1:
+                option = current
+                if not option:
+                    option = {
+                        "kind": "folder",
+                        "label": history_item.get("last_option_label", ""),
+                        "url": folder_url,
+                        "season": None,
+                        "quality": "",
+                    }
+                self._play_series_browse_episode(history_item, option, episodes[next_idx])
+                return
+
+        # If we get here, either current episode is the last one in this folder or not found
+        # Try next season
+        season, quality = self._get_option_context(current, history_item)
         candidates = []
         if season is not None:
             for opt in options:
@@ -1863,17 +1807,15 @@ class MediaHubApp:
         candidates.sort(key=candidate_key)
 
         for candidate in candidates:
-            cand_eps = self._fetch_episodes(candidate.get("url", ""))
+            cand_eps = fetch_episodes_from_folder(candidate.get("url", ""))
             if not cand_eps:
                 continue
-            cand_eps = self._sort_episodes(cand_eps)
-            self._play_series_browse_episode(
-                history_item,
-                candidate,
-                cand_eps[0],
-            )
-            return
+            cand_eps = sort_episodes(cand_eps)
+            if cand_eps:
+                self._play_series_browse_episode(history_item, candidate, cand_eps[0])
+                return
 
+        # No more episodes anywhere
         if options:
             if season is None:
                 self._open_browse(history_item)
@@ -2203,7 +2145,7 @@ class MediaHubApp:
             ]
             self.page.update()
 
-            episodes = self._fetch_episodes(option.get("url", ""))
+            episodes = fetch_episodes_from_folder(option.get("url", ""))
             if episodes is None:
                 set_message("Failed to load episodes.")
                 return
@@ -2211,7 +2153,7 @@ class MediaHubApp:
                 set_message("No episodes found.")
                 return
 
-            episodes = self._sort_episodes(episodes)
+            episodes = sort_episodes(episodes)
             current_url = history_item.get("last_episode_url", "")
 
             controls = []
@@ -2477,7 +2419,7 @@ class MediaHubApp:
 
     def _load_current_folder_episodes(self, history_item):
         folder_url = history_item.get("last_folder_url", "")
-        episodes = self._fetch_episodes(folder_url)
+        episodes = fetch_episodes_from_folder(folder_url)
 
         if episodes is None:
             self._show_snackbar("Failed to load episodes.")
@@ -2487,7 +2429,7 @@ class MediaHubApp:
             self._show_snackbar("No episodes found.")
             return
 
-        episodes = self._sort_episodes(episodes)
+        episodes = sort_episodes(episodes)
 
         option = {
             "kind": "folder",
@@ -2718,7 +2660,7 @@ class MediaHubApp:
         ).start()
 
     def _load_episode_picker(self, media: dict, option: dict):
-        episodes = self._fetch_episodes(option.get("url", ""))
+        episodes = fetch_episodes_from_folder(option.get("url", ""))
 
         if episodes is None:
             self._show_snackbar("Failed to load episodes.")
@@ -2728,7 +2670,7 @@ class MediaHubApp:
             self._show_snackbar("No episodes found.")
             return
 
-        episodes = self._sort_episodes(episodes)
+        episodes = sort_episodes(episodes)
         logger.info(
             "episode picker loaded: %s episodes for %s",
             len(episodes),

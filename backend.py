@@ -3,9 +3,11 @@ import logging
 import sqlite3
 import subprocess
 import sys
+import re
 
 import chompjs
 import requests
+from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 
@@ -41,6 +43,10 @@ USER_AGENT = (
 )
 
 DB_NAME = "media_hub.db"
+
+SIZE_PATTERN = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:[KMGT]i?B|[KMGT])\b"
+)
 
 
 class DatabaseManager:
@@ -95,6 +101,12 @@ class DatabaseManager:
                 imdb_id TEXT PRIMARY KEY,
                 poster_url TEXT,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS series_latest_episode (
+                folder_url TEXT PRIMARY KEY,
+                latest_episode_filename TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             """
         )
@@ -228,6 +240,29 @@ class DatabaseManager:
         conn.commit()
         conn.close()
 
+    def get_cached_latest_episode(self, folder_url: str):
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT latest_episode_filename FROM series_latest_episode "
+            "WHERE folder_url = ?",
+            (folder_url,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row["latest_episode_filename"] if row else None
+
+    def save_latest_episode(self, folder_url: str, filename: str):
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO series_latest_episode "
+            "(folder_url, latest_episode_filename) VALUES (?, ?)",
+            (folder_url, filename),
+        )
+        conn.commit()
+        conn.close()
+
     def sync_catalog(self, js_url: str = None) -> bool:
         if js_url is None:
             js_url = self.get_js_url()
@@ -293,6 +328,27 @@ class DatabaseManager:
             "sync_catalog: %s items imported",
             len(rows),
         )
+
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT imdb_id, last_folder_url FROM history "
+            "WHERE media_type = 'series' AND last_folder_url IS NOT NULL AND last_folder_url != ''"
+        )
+        history_series = cursor.fetchall()
+        conn.close()
+
+        for row in history_series:
+            folder_url = row['last_folder_url']
+            episodes = fetch_episodes_from_folder(folder_url)
+            if episodes is None:
+                continue
+            sorted_eps = sort_episodes(episodes)
+            if sorted_eps:
+                latest = sorted_eps[-1].get("filename", "")
+                if latest:
+                    self.save_latest_episode(folder_url, latest)
+
         return True
 
     def search(self, query: str) -> list:
@@ -605,3 +661,83 @@ def format_time(seconds: float) -> str:
         return f"{hours}:{minutes:02d}:{secs:02d}"
 
     return f"{minutes}:{secs:02d}"
+
+
+def fetch_episodes_from_folder(folder_url: str):
+    try:
+        base = folder_url.rstrip("/") + "/"
+        logger.info("fetching episodes from: %s", base)
+        session = DatabaseManager._get_robust_session()
+        res = session.get(base, timeout=15)
+        logger.debug(
+            "fetch episodes: HTTP %s content_len=%s",
+            res.status_code,
+            len(res.text),
+        )
+        res.raise_for_status()
+        soup = BeautifulSoup(res.text, "html.parser")
+        episodes = []
+        for a in soup.find_all("a"):
+            href = a.get("href", "")
+            if not href.lower().endswith(
+                (".mkv", ".mp4", ".avi")
+            ):
+                continue
+            if href.startswith("http"):
+                url = href
+            else:
+                url = base + href.lstrip("/")
+            filename = a.text.strip()
+            episodes.append(
+                {
+                    "filename": filename,
+                    "url": url,
+                    "size": _extract_size(a),
+                }
+            )
+        logger.info("found %s episode links", len(episodes))
+        return episodes
+    except Exception:
+        logger.exception("fetch episodes failed: %s", folder_url)
+        return None
+
+
+def _extract_size(a_tag):
+    sibling = a_tag.next_sibling
+    if sibling is not None and isinstance(sibling, str):
+        match = SIZE_PATTERN.search(sibling)
+        if match:
+            return match.group(0).strip()
+    row = a_tag.find_parent("tr")
+    if row is not None:
+        match = SIZE_PATTERN.search(row.get_text(" "))
+        if match:
+            return match.group(0).strip()
+    return ""
+
+
+def sort_episodes(episodes):
+    def key(ep):
+        filename = ep.get("filename", "")
+        match = re.search(
+            r"[Ss](\d{1,2})\s*[Ee](\d{1,2})",
+            filename,
+        )
+        if match:
+            return (
+                0,
+                int(match.group(1)),
+                int(match.group(2)),
+                filename,
+            )
+        match = re.search(r"(\d{1,2})x(\d{1,2})", filename)
+        if match:
+            return (
+                0,
+                int(match.group(1)),
+                int(match.group(2)),
+                filename,
+            )
+        return (1, 0, 0, filename)
+
+    return sorted(episodes, key=key)
