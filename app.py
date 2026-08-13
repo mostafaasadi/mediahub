@@ -802,7 +802,8 @@ class MediaHubApp:
             return None
         now = time.time()
         cached = self._episodes_cache.get(folder_url)
-        if cached and now - cached[0] < 1800:
+        # 3 days = 259200 seconds
+        if cached and now - cached[0] < 259200:  # 3 days
             return cached[1]
         episodes = fetch_episodes_from_folder(folder_url)
         if episodes is not None:
@@ -1209,6 +1210,7 @@ class MediaHubApp:
 
     def _sync_task(self, force_url: str = None):
         try:
+            self._episodes_cache.clear()
             success = self.db.sync_catalog(js_url=force_url)
         except Exception:
             logger.exception("sync task failed")
@@ -1725,7 +1727,7 @@ class MediaHubApp:
                 self._show_snackbar("No folder URL found.")
             return
 
-        episodes = fetch_episodes_from_folder(folder_url)
+        episodes = self._get_cached_episodes(folder_url)
         if episodes is None:
             if options:
                 self._open_browse(history_item)
@@ -1738,10 +1740,9 @@ class MediaHubApp:
             self._show_snackbar("No episodes found.")
             return
 
-        # First, try to find current episode by index
+        # Try to find current episode by index
         current_idx = self._find_episode_index(episodes, history_item)
         if current_idx != -1 and current_idx + 1 < len(episodes):
-            # Next episode exists in same folder
             option = current
             if not option:
                 option = {
@@ -1754,13 +1755,12 @@ class MediaHubApp:
             self._play_series_browse_episode(history_item, option, episodes[current_idx + 1])
             return
 
-        # If current episode not found or it's the last one, try by season/episode numbers
+        # Try by season/episode numbers
         current_filename = (history_item.get("last_episode_filename") or "").strip()
         current_se = parse_season_episode_tuple(current_filename)
         next_idx = -1
         if current_se is not None:
             current_season, current_episode = current_se
-            # Find the first episode with season > current_season or same season but episode > current_episode
             for idx, ep in enumerate(episodes):
                 ep_filename = ep.get("filename", "").strip()
                 ep_se = parse_season_episode_tuple(ep_filename)
@@ -1771,21 +1771,20 @@ class MediaHubApp:
                     next_idx = idx
                     break
 
-            if next_idx != -1:
-                option = current
-                if not option:
-                    option = {
-                        "kind": "folder",
-                        "label": history_item.get("last_option_label", ""),
-                        "url": folder_url,
-                        "season": None,
-                        "quality": "",
-                    }
-                self._play_series_browse_episode(history_item, option, episodes[next_idx])
-                return
+        if next_idx != -1:
+            option = current
+            if not option:
+                option = {
+                    "kind": "folder",
+                    "label": history_item.get("last_option_label", ""),
+                    "url": folder_url,
+                    "season": None,
+                    "quality": "",
+                }
+            self._play_series_browse_episode(history_item, option, episodes[next_idx])
+            return
 
-        # If we get here, either current episode is the last one in this folder or not found
-        # Try next season
+        # Try next season from catalog options
         season, quality = self._get_option_context(current, history_item)
         candidates = []
         if season is not None:
@@ -1807,7 +1806,7 @@ class MediaHubApp:
         candidates.sort(key=candidate_key)
 
         for candidate in candidates:
-            cand_eps = fetch_episodes_from_folder(candidate.get("url", ""))
+            cand_eps = self._get_cached_episodes(candidate.get("url", ""))
             if not cand_eps:
                 continue
             cand_eps = sort_episodes(cand_eps)
@@ -1815,7 +1814,7 @@ class MediaHubApp:
                 self._play_series_browse_episode(history_item, candidate, cand_eps[0])
                 return
 
-        # No more episodes anywhere
+        # No more episodes
         if options:
             if season is None:
                 self._open_browse(history_item)
