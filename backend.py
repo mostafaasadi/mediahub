@@ -345,7 +345,14 @@ class DatabaseManager:
                 continue
             sorted_eps = sort_episodes(episodes)
             if sorted_eps:
-                latest = sorted_eps[-1].get("filename", "")
+                latest = ""
+                for ep in reversed(sorted_eps):
+                    filename = ep.get("filename", "")
+                    if parse_season_episode_tuple(filename):
+                        latest = filename
+                        break
+                if not latest:
+                    latest = sorted_eps[-1].get("filename", "")
                 if latest:
                     self.save_latest_episode(folder_url, latest)
 
@@ -741,3 +748,18 @@ def sort_episodes(episodes):
         return (1, 0, 0, filename)
 
     return sorted(episodes, key=key)
+
+
+def parse_season_episode_tuple(filename):
+    if not filename:
+        return None
+    match = re.search(
+        r"[Ss](\d{1,2})\s*[Ee](\d{1,2})",
+        filename,
+    )
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    match = re.search(r"(\d{1,2})x(\d{1,2})", filename)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    return None

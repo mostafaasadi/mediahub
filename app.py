@@ -1374,7 +1374,14 @@ class MediaHubApp:
                 last_ep = item.get("last_episode_filename", "")
                 if folder_url and last_ep:
                     cached_latest = self.db.get_cached_latest_episode(folder_url)
-                    finished = (cached_latest == last_ep) if cached_latest is not None else False
+                    finished = False
+                    if cached_latest is not None:
+                        cached_se = parse_season_episode_tuple(cached_latest)
+                        last_se = parse_season_episode_tuple(last_ep)
+                        if cached_se and last_se:
+                            finished = (cached_se == last_se)
+                        else:
+                            finished = (cached_latest == last_ep)
                 else:
                     finished = True
                 item["_series_finished"] = finished
