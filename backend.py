@@ -26,9 +26,7 @@ if not logger.handlers:
     _sh = logging.StreamHandler(sys.stdout)
     _sh.setLevel(logging.INFO)
     _sh.setFormatter(
-        logging.Formatter(
-            "%(asctime)s [%(levelname)s] %(message)s"
-        )
+        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     )
     logger.addHandler(_sh)
 
@@ -47,6 +45,24 @@ DB_NAME = "media_hub.db"
 SIZE_PATTERN = re.compile(
     r"\b\d+(?:\.\d+)?\s*(?:[KMGT]i?B|[KMGT])\b"
 )
+
+
+def parse_season_episode_tuple(filename):
+    if not filename:
+        return None
+
+    match = re.search(
+        r"[Ss](\d{1,2})\s*[Ee](\d{1,2})",
+        filename,
+    )
+    if match:
+        return int(match.group(1)), int(match.group(2))
+
+    match = re.search(r"(\d{1,2})x(\d{1,2})", filename)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+
+    return None
 
 
 class DatabaseManager:
@@ -108,6 +124,12 @@ class DatabaseManager:
                 latest_episode_filename TEXT,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS omdb_season_cache (
+                imdb_id TEXT PRIMARY KEY,
+                total_seasons INTEGER,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
             """
         )
         conn.commit()
@@ -119,7 +141,9 @@ class DatabaseManager:
             conn.commit()
         except sqlite3.OperationalError:
             pass
+
         self._ensure_indexes(conn)
+
         cursor.execute(
             "SELECT value FROM settings WHERE key = 'js_url'"
         )
@@ -143,7 +167,6 @@ class DatabaseManager:
 
     def _ensure_indexes(self, conn: sqlite3.Connection):
         cursor = conn.cursor()
-
         indexes = (
             """
             CREATE INDEX IF NOT EXISTS idx_movies_title_en
@@ -162,10 +185,8 @@ class DatabaseManager:
             ON history(timestamp DESC)
             """,
         )
-
         for sql in indexes:
             cursor.execute(sql)
-
         conn.commit()
 
     def get_js_url(self) -> str:
@@ -263,6 +284,28 @@ class DatabaseManager:
         conn.commit()
         conn.close()
 
+    def get_cached_total_seasons(self, imdb_id: str):
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT total_seasons FROM omdb_season_cache WHERE imdb_id = ?",
+            (imdb_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row["total_seasons"] if row else None
+
+    def save_total_seasons(self, imdb_id: str, total_seasons: int):
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO omdb_season_cache "
+            "(imdb_id, total_seasons) VALUES (?, ?)",
+            (imdb_id, total_seasons),
+        )
+        conn.commit()
+        conn.close()
+
     def sync_catalog(self, js_url: str = None) -> bool:
         if js_url is None:
             js_url = self.get_js_url()
@@ -293,11 +336,9 @@ class DatabaseManager:
             return False
 
         rows = []
-
         for item in data:
             if not isinstance(item, list) or len(item) < 8:
                 continue
-
             if item[1] not in ("movie", "series"):
                 continue
 
@@ -339,20 +380,24 @@ class DatabaseManager:
         conn.close()
 
         for row in history_series:
-            folder_url = row['last_folder_url']
+            folder_url = row["last_folder_url"]
             episodes = fetch_episodes_from_folder(folder_url)
             if episodes is None:
                 continue
+
             sorted_eps = sort_episodes(episodes)
             if sorted_eps:
                 latest = ""
+
                 for ep in reversed(sorted_eps):
                     filename = ep.get("filename", "")
                     if parse_season_episode_tuple(filename):
                         latest = filename
                         break
+
                 if not latest:
                     latest = sorted_eps[-1].get("filename", "")
+
                 if latest:
                     self.save_latest_episode(folder_url, latest)
 
@@ -439,6 +484,7 @@ class DatabaseManager:
             )
             row = cursor.fetchone()
             existing_dur = row["duration"] if row else None
+
             cursor.execute(
                 "INSERT OR REPLACE INTO watch_progress "
                 "(media_url, time_pos, duration) VALUES (?, ?, ?)",
@@ -478,6 +524,7 @@ class DatabaseManager:
                 "User-Agent": USER_AGENT,
             }
         )
+
         retries = Retry(
             total=3,
             backoff_factor=1,
@@ -486,6 +533,7 @@ class DatabaseManager:
         adapter = HTTPAdapter(max_retries=retries)
         session.mount("https://", adapter)
         session.mount("http://", adapter)
+
         return session
 
 
@@ -495,10 +543,12 @@ class PosterManager:
         self.session = self._get_fast_session()
         self.api_key = self.db.get_omdb_api_key()
         self.failed = set()
+        self.season_failed = set()
 
     def reload_api_key(self):
         self.api_key = self.db.get_omdb_api_key()
         self.failed.clear()
+        self.season_failed.clear()
 
     def get_poster_url(self, imdb_id: str) -> str:
         if not imdb_id or imdb_id in self.failed:
@@ -519,6 +569,7 @@ class PosterManager:
             )
             response.raise_for_status()
             data = response.json()
+
             poster_url = data.get("Poster", "")
 
             if data.get("Response") == "True" and poster_url:
@@ -532,6 +583,50 @@ class PosterManager:
 
         return ""
 
+    def get_total_seasons(self, imdb_id: str):
+        if not imdb_id or imdb_id in self.season_failed:
+            return None
+
+        cached = self.db.get_cached_total_seasons(imdb_id)
+        if cached is not None:
+            if cached > 0:
+                return cached
+            return None
+
+        if not self.api_key:
+            return None
+
+        try:
+            response = self.session.get(
+                "https://www.omdbapi.com/",
+                params={"i": imdb_id, "apikey": self.api_key},
+                timeout=3,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get("Response") == "True":
+                raw = data.get("totalSeasons", "")
+
+                if raw and raw != "N/A":
+                    try:
+                        total = int(str(raw).strip())
+                    except Exception:
+                        total = 0
+
+                    if total > 0:
+                        self.db.save_total_seasons(imdb_id, total)
+                        return total
+
+                self.db.save_total_seasons(imdb_id, 0)
+                return None
+
+            self.season_failed.add(imdb_id)
+        except Exception:
+            self.season_failed.add(imdb_id)
+
+        return None
+
     @staticmethod
     def _get_fast_session() -> requests.Session:
         session = requests.Session()
@@ -540,6 +635,7 @@ class PosterManager:
                 "User-Agent": USER_AGENT,
             }
         )
+
         retries = Retry(
             total=1,
             backoff_factor=0.2,
@@ -548,6 +644,7 @@ class PosterManager:
         adapter = HTTPAdapter(max_retries=retries)
         session.mount("https://", adapter)
         session.mount("http://", adapter)
+
         return session
 
 
@@ -674,27 +771,34 @@ def fetch_episodes_from_folder(folder_url: str):
     try:
         base = folder_url.rstrip("/") + "/"
         logger.info("fetching episodes from: %s", base)
+
         session = DatabaseManager._get_robust_session()
         res = session.get(base, timeout=15)
+
         logger.debug(
             "fetch episodes: HTTP %s content_len=%s",
             res.status_code,
             len(res.text),
         )
+
         res.raise_for_status()
+
         soup = BeautifulSoup(res.text, "html.parser")
         episodes = []
+
         for a in soup.find_all("a"):
             href = a.get("href", "")
-            if not href.lower().endswith(
-                (".mkv", ".mp4", ".avi")
-            ):
+
+            if not href.lower().endswith((".mkv", ".mp4", ".avi")):
                 continue
+
             if href.startswith("http"):
                 url = href
             else:
                 url = base + href.lstrip("/")
+
             filename = a.text.strip()
+
             episodes.append(
                 {
                     "filename": filename,
@@ -702,6 +806,7 @@ def fetch_episodes_from_folder(folder_url: str):
                     "size": _extract_size(a),
                 }
             )
+
         logger.info("found %s episode links", len(episodes))
         return episodes
     except Exception:
@@ -711,21 +816,25 @@ def fetch_episodes_from_folder(folder_url: str):
 
 def _extract_size(a_tag):
     sibling = a_tag.next_sibling
+
     if sibling is not None and isinstance(sibling, str):
         match = SIZE_PATTERN.search(sibling)
         if match:
             return match.group(0).strip()
+
     row = a_tag.find_parent("tr")
     if row is not None:
         match = SIZE_PATTERN.search(row.get_text(" "))
         if match:
             return match.group(0).strip()
+
     return ""
 
 
 def sort_episodes(episodes):
     def key(ep):
         filename = ep.get("filename", "")
+
         match = re.search(
             r"[Ss](\d{1,2})\s*[Ee](\d{1,2})",
             filename,
@@ -737,6 +846,7 @@ def sort_episodes(episodes):
                 int(match.group(2)),
                 filename,
             )
+
         match = re.search(r"(\d{1,2})x(\d{1,2})", filename)
         if match:
             return (
@@ -745,21 +855,7 @@ def sort_episodes(episodes):
                 int(match.group(2)),
                 filename,
             )
+
         return (1, 0, 0, filename)
 
     return sorted(episodes, key=key)
-
-
-def parse_season_episode_tuple(filename):
-    if not filename:
-        return None
-    match = re.search(
-        r"[Ss](\d{1,2})\s*[Ee](\d{1,2})",
-        filename,
-    )
-    if match:
-        return int(match.group(1)), int(match.group(2))
-    match = re.search(r"(\d{1,2})x(\d{1,2})", filename)
-    if match:
-        return int(match.group(1)), int(match.group(2))
-    return None
