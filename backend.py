@@ -2,6 +2,7 @@ import json
 import logging
 import sqlite3
 import subprocess
+import threading
 import sys
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -530,9 +531,16 @@ class PlayerManager:
         self.current_time_pos = 0.0
         self.current_duration = 0.0
         self.on_error = None
+        self._is_playing = False
+        self._lock = threading.Lock()
 
     def play(self, url: str, start_time: float = 0.0, referer: str = None):
+        if not self._lock.acquire(blocking=False):
+            logger.warning("Playback already in progress. Ignoring duplicate trigger.")
+            return
+
         try:
+            self._is_playing = True
             if HAS_PYTHON_MPV:
                 self._play_with_python_mpv(url, start_time, referer)
             else:
@@ -542,6 +550,9 @@ class PlayerManager:
             message = f"Playback failed: {exc}"
             if self.on_error:
                 self.on_error(message)
+        finally:
+            self._is_playing = False
+            self._lock.release()
 
     def _play_with_python_mpv(self, url: str, start_time: float, referer: str = None):
         self.current_time_pos = 0.0
