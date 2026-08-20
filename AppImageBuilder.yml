@@ -1,30 +1,40 @@
 version: 1
 script:
-  - apt-get update && apt-get install -y python3-pip python3-venv mpv
+  - apt-get update
+  - apt-get install -y python3-pip python3-venv libmpv-dev mpv
+  - python3 -m pip install --upgrade pip
   - python3 -m pip install -r requirements.txt
 
 AppDir:
   path: ./AppDir
   app_info:
-    id: com.example.mediahub
+    id: com.mediahub.app
     name: MediaHub
-    icon: mediahub
+    icon: default
     version: 1.0.0
+    # اسکریپت یا فایل اصلی ورودی برنامه
     exec: usr/bin/python3
-    exec_args: "$APPDIR/main.py "$@""
+    exec_args: "$APPDIR/app.py "$@""
   
   apt:
     arch: amd64
     sources:
-      - sourceline: 'deb http://archive.ubuntu.com/ubuntu/ jammy main universe'
+      - sourceline: 'deb http://archive.ubuntu.com/ubuntu/ focal main universe restricted multiverse'
+      - sourceline: 'deb http://archive.ubuntu.com/ubuntu/ focal-updates main universe restricted multiverse'
     include:
       - python3
       - python3-pkg-resources
-      - libmpv2
+      - python3-tk
+      - libmpv1
+      - mpv
+      - libgl1-mesa-glx
+      - libegl1-mesa
 
   files:
     include: []
-    exclude: []
+    exclude:
+      - usr/share/man
+      - usr/share/doc
 
 AppImage:
   arch: x86_64
