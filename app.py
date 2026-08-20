@@ -384,9 +384,9 @@ class ModernMediaCard(ft.Container):
                 browse_tip = "Quality options"
 
             self.browse_btn = ft.Container(
-                width=24,
-                height=24,
-                border_radius=12,
+                width=26,
+                height=26,
+                border_radius=13,
                 bgcolor="#1AFFFFFF",
                 alignment=ft.Alignment(0, 0),
                 content=ft.Icon(
@@ -406,9 +406,9 @@ class ModernMediaCard(ft.Container):
 
             if media_type == "series":
                 self.next_btn = ft.Container(
-                    width=24,
-                    height=24,
-                    border_radius=12,
+                    width=26,
+                    height=26,
+                    border_radius=13,
                     bgcolor="#1AFFFFFF",
                     alignment=ft.Alignment(0, 0),
                     content=ft.Icon(
@@ -448,6 +448,8 @@ class ModernMediaCard(ft.Container):
                     size=10,
                     weight="700",
                     color=T.ACCENT_2,
+                    overflow="ellipsis",
+                    max_lines=1,
                 )
             )
 
@@ -461,7 +463,7 @@ class ModernMediaCard(ft.Container):
 
         meta_row = ft.Row(
             meta_children,
-            spacing=6,
+            spacing=4,
             vertical_alignment="center",
         )
 
@@ -782,14 +784,20 @@ class MediaHubApp:
             ),
             scrollbar_theme=ft.ScrollbarTheme(
                 thickness=5,
-                radius=3,
-                thumb_color=T.BORDER_LIGHT,
+                radius=10,
+                thumb_color="#406366F1",
                 track_color="transparent",
+                track_border_color="transparent",
+                thumb_visibility=False,
+                track_visibility=False,
+                main_axis_margin=12,
+                cross_axis_margin=4,
             ),
         )
 
         self.page.padding = 0
-        self.page.scroll = "auto"
+        self.page.spacing = 0
+        self.page.scroll = None
         self.page.window_width = 1200
         self.page.window_height = 800
 
@@ -941,9 +949,6 @@ class MediaHubApp:
         )
 
         nav_bar = ft.Container(
-            top=0,
-            left=0,
-            right=0,
             content=ft.Row(
                 [
                     self.search_field,
@@ -1033,32 +1038,27 @@ class MediaHubApp:
             visible=False,
         )
 
-        main_content = ft.Container(
-            top=0,
-            left=0,
-            right=0,
-            bottom=0,
-            content=ft.Column(
-                [
-                    self.continue_section,
-                    self.watched_series_section,
-                    self.watched_movies_section,
-                    self.library_section,
-                ],
-                spacing=0,
-                scroll="auto",
-                expand=True,
-            ),
-            padding=ft.Padding(
-                left=0,
-                top=76,
-                right=0,
-                bottom=0,
-            ),
+        main_content = ft.ListView(
+            controls=[
+                self.continue_section,
+                self.watched_series_section,
+                self.watched_movies_section,
+                self.library_section,
+            ],
+            spacing=0,
+            expand=True,
+            padding=ft.Padding(left=0, top=0, right=6, bottom=20),
         )
 
         self.page.add(
-            ft.Stack([main_content, nav_bar], expand=True)
+            ft.Column(
+                [
+                    nav_bar,
+                    main_content,
+                ],
+                spacing=0,
+                expand=True,
+            )
         )
 
         if hasattr(self.page, "on_resized"):
