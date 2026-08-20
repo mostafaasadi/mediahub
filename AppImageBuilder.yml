@@ -1,0 +1,31 @@
+version: 1
+script:
+  - apt-get update && apt-get install -y python3-pip python3-venv mpv
+  - python3 -m pip install -r requirements.txt
+
+AppDir:
+  path: ./AppDir
+  app_info:
+    id: com.example.mediahub
+    name: MediaHub
+    icon: mediahub
+    version: 1.0.0
+    exec: usr/bin/python3
+    exec_args: "$APPDIR/main.py "$@""
+  
+  apt:
+    arch: amd64
+    sources:
+      - sourceline: 'deb http://archive.ubuntu.com/ubuntu/ jammy main universe'
+    include:
+      - python3
+      - python3-pkg-resources
+      - libmpv2
+
+  files:
+    include: []
+    exclude: []
+
+AppImage:
+  arch: x86_64
+  update-information: None
