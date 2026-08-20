@@ -4,6 +4,7 @@ import sqlite3
 import subprocess
 import sys
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 import chompjs
 import requests
@@ -71,240 +72,197 @@ class DatabaseManager:
         self._init_tables()
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA cache_size = -64000;")
         return conn
 
     def _init_tables(self):
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS movies (
-                imdb_id TEXT PRIMARY KEY,
-                type TEXT,
-                title_en TEXT,
-                title_fa TEXT,
-                year INTEGER,
-                rating REAL,
-                links TEXT
-            );
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS movies (
+                    imdb_id TEXT PRIMARY KEY,
+                    type TEXT,
+                    title_en TEXT,
+                    title_fa TEXT,
+                    year INTEGER,
+                    rating REAL,
+                    links TEXT
+                );
 
-            CREATE TABLE IF NOT EXISTS history (
-                imdb_id TEXT PRIMARY KEY,
-                media_type TEXT,
-                title_en TEXT,
-                year INTEGER,
-                last_option_label TEXT,
-                last_folder_url TEXT,
-                last_episode_url TEXT,
-                last_episode_filename TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
+                CREATE TABLE IF NOT EXISTS history (
+                    imdb_id TEXT PRIMARY KEY,
+                    media_type TEXT,
+                    title_en TEXT,
+                    year INTEGER,
+                    last_option_label TEXT,
+                    last_folder_url TEXT,
+                    last_episode_url TEXT,
+                    last_episode_filename TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
 
-            CREATE TABLE IF NOT EXISTS watch_progress (
-                media_url TEXT PRIMARY KEY,
-                time_pos REAL,
-                duration REAL
-            );
+                CREATE TABLE IF NOT EXISTS watch_progress (
+                    media_url TEXT PRIMARY KEY,
+                    time_pos REAL,
+                    duration REAL
+                );
 
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            );
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                );
 
-            CREATE TABLE IF NOT EXISTS poster_cache (
-                imdb_id TEXT PRIMARY KEY,
-                poster_url TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
+                CREATE TABLE IF NOT EXISTS poster_cache (
+                    imdb_id TEXT PRIMARY KEY,
+                    poster_url TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
 
-            CREATE TABLE IF NOT EXISTS series_latest_episode (
-                folder_url TEXT PRIMARY KEY,
-                latest_episode_filename TEXT,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
+                CREATE TABLE IF NOT EXISTS series_latest_episode (
+                    folder_url TEXT PRIMARY KEY,
+                    latest_episode_filename TEXT,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
 
-            CREATE TABLE IF NOT EXISTS omdb_season_cache (
-                imdb_id TEXT PRIMARY KEY,
-                total_seasons INTEGER,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-            """
-        )
-        conn.commit()
-
-        try:
-            cursor.execute(
-                "ALTER TABLE watch_progress ADD COLUMN duration REAL"
+                CREATE TABLE IF NOT EXISTS omdb_season_cache (
+                    imdb_id TEXT PRIMARY KEY,
+                    total_seasons INTEGER,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+                """
             )
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass
+            try:
+                cursor.execute(
+                    "ALTER TABLE watch_progress ADD COLUMN duration REAL"
+                )
+            except sqlite3.OperationalError:
+                pass
 
-        self._ensure_indexes(conn)
+            self._ensure_indexes(conn)
 
-        cursor.execute(
-            "SELECT value FROM settings WHERE key = 'js_url'"
-        )
-        if not cursor.fetchone():
             cursor.execute(
-                "INSERT INTO settings (key, value) VALUES ('js_url', ?)",
-                (DEFAULT_JS_URL,),
+                "SELECT value FROM settings WHERE key = 'js_url'"
             )
+            if not cursor.fetchone():
+                cursor.execute(
+                    "INSERT INTO settings (key, value) VALUES ('js_url', ?)",
+                    (DEFAULT_JS_URL,),
+                )
 
-        cursor.execute(
-            "SELECT value FROM settings WHERE key = 'omdb_api_key'"
-        )
-        if not cursor.fetchone():
             cursor.execute(
-                "INSERT INTO settings (key, value) "
-                "VALUES ('omdb_api_key', '')"
+                "SELECT value FROM settings WHERE key = 'omdb_api_key'"
             )
-
-        conn.commit()
-        conn.close()
+            if not cursor.fetchone():
+                cursor.execute(
+                    "INSERT INTO settings (key, value) VALUES ('omdb_api_key', '')"
+                )
 
     def _ensure_indexes(self, conn: sqlite3.Connection):
         cursor = conn.cursor()
         indexes = (
-            """
-            CREATE INDEX IF NOT EXISTS idx_movies_title_en
-            ON movies(title_en)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_movies_title_fa
-            ON movies(title_fa)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_movies_type
-            ON movies(type)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_history_timestamp
-            ON history(timestamp DESC)
-            """,
+            "CREATE INDEX IF NOT EXISTS idx_movies_title_en ON movies(title_en)",
+            "CREATE INDEX IF NOT EXISTS idx_movies_title_fa ON movies(title_fa)",
+            "CREATE INDEX IF NOT EXISTS idx_movies_type ON movies(type)",
+            "CREATE INDEX IF NOT EXISTS idx_history_timestamp ON history(timestamp DESC)",
         )
         for sql in indexes:
             cursor.execute(sql)
-        conn.commit()
 
     def get_js_url(self) -> str:
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT value FROM settings WHERE key = 'js_url'"
-        )
-        row = cursor.fetchone()
-        conn.close()
-        return row["value"] if row else DEFAULT_JS_URL
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM settings WHERE key = 'js_url'")
+            row = cursor.fetchone()
+            return row["value"] if row else DEFAULT_JS_URL
 
     def update_js_url(self, new_url: str) -> bool:
         try:
-            conn = self._get_conn()
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT OR REPLACE INTO settings (key, value) "
-                "VALUES ('js_url', ?)",
-                (new_url.strip(),),
-            )
-            conn.commit()
-            conn.close()
-            return True
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT OR REPLACE INTO settings (key, value) VALUES ('js_url', ?)",
+                    (new_url.strip(),),
+                )
+                return True
         except Exception:
             return False
 
     def get_omdb_api_key(self) -> str:
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT value FROM settings WHERE key = 'omdb_api_key'"
-        )
-        row = cursor.fetchone()
-        conn.close()
-        return row["value"] if row else ""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM settings WHERE key = 'omdb_api_key'")
+            row = cursor.fetchone()
+            return row["value"] if row else ""
 
     def update_omdb_api_key(self, new_key: str) -> bool:
         try:
-            conn = self._get_conn()
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT OR REPLACE INTO settings (key, value) "
-                "VALUES ('omdb_api_key', ?)",
-                (new_key.strip(),),
-            )
-            conn.commit()
-            conn.close()
-            return True
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT OR REPLACE INTO settings (key, value) VALUES ('omdb_api_key', ?)",
+                    (new_key.strip(),),
+                )
+                return True
         except Exception:
             return False
 
     def get_cached_poster(self, imdb_id: str):
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT poster_url FROM poster_cache WHERE imdb_id = ?",
-            (imdb_id,),
-        )
-        row = cursor.fetchone()
-        conn.close()
-        return row["poster_url"] if row else None
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT poster_url FROM poster_cache WHERE imdb_id = ?",
+                (imdb_id,),
+            )
+            row = cursor.fetchone()
+            return row["poster_url"] if row else None
 
     def save_poster_cache(self, imdb_id: str, poster_url: str):
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT OR REPLACE INTO poster_cache "
-            "(imdb_id, poster_url) VALUES (?, ?)",
-            (imdb_id, poster_url),
-        )
-        conn.commit()
-        conn.close()
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO poster_cache (imdb_id, poster_url) VALUES (?, ?)",
+                (imdb_id, poster_url),
+            )
 
     def get_cached_latest_episode(self, folder_url: str):
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT latest_episode_filename FROM series_latest_episode "
-            "WHERE folder_url = ?",
-            (folder_url,),
-        )
-        row = cursor.fetchone()
-        conn.close()
-        return row["latest_episode_filename"] if row else None
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT latest_episode_filename FROM series_latest_episode WHERE folder_url = ?",
+                (folder_url,),
+            )
+            row = cursor.fetchone()
+            return row["latest_episode_filename"] if row else None
 
     def save_latest_episode(self, folder_url: str, filename: str):
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT OR REPLACE INTO series_latest_episode "
-            "(folder_url, latest_episode_filename) VALUES (?, ?)",
-            (folder_url, filename),
-        )
-        conn.commit()
-        conn.close()
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO series_latest_episode (folder_url, latest_episode_filename) VALUES (?, ?)",
+                (folder_url, filename),
+            )
 
     def get_cached_total_seasons(self, imdb_id: str):
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT total_seasons FROM omdb_season_cache WHERE imdb_id = ?",
-            (imdb_id,),
-        )
-        row = cursor.fetchone()
-        conn.close()
-        return row["total_seasons"] if row else None
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT total_seasons FROM omdb_season_cache WHERE imdb_id = ?",
+                (imdb_id,),
+            )
+            row = cursor.fetchone()
+            return row["total_seasons"] if row else None
 
     def save_total_seasons(self, imdb_id: str, total_seasons: int):
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT OR REPLACE INTO omdb_season_cache "
-            "(imdb_id, total_seasons) VALUES (?, ?)",
-            (imdb_id, total_seasons),
-        )
-        conn.commit()
-        conn.close()
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO omdb_season_cache (imdb_id, total_seasons) VALUES (?, ?)",
+                (imdb_id, total_seasons),
+            )
 
     def sync_catalog(self, js_url: str = None) -> bool:
         if js_url is None:
@@ -336,15 +294,18 @@ class DatabaseManager:
             return False
 
         rows = []
+        imdb_ids_to_fetch = []
         for item in data:
             if not isinstance(item, list) or len(item) < 8:
                 continue
             if item[1] not in ("movie", "series"):
                 continue
 
+            imdb_id = item[0]
+            imdb_ids_to_fetch.append(imdb_id)
             rows.append(
                 (
-                    item[0],
+                    imdb_id,
                     item[1],
                     item[2],
                     item[3],
@@ -354,297 +315,212 @@ class DatabaseManager:
                 )
             )
 
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM movies")
-        cursor.executemany(
-            "INSERT OR REPLACE INTO movies VALUES "
-            "(?, ?, ?, ?, ?, ?, ?)",
-            rows,
-        )
-        conn.commit()
-        conn.close()
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM movies")
+            cursor.executemany(
+                "INSERT OR REPLACE INTO movies VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
 
-        logger.info(
-            "sync_catalog: %s items imported",
-            len(rows),
-        )
+        logger.info("sync_catalog: %s items imported", len(rows))
 
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT imdb_id, last_folder_url FROM history "
-            "WHERE media_type = 'series' AND last_folder_url IS NOT NULL AND last_folder_url != ''"
-        )
-        history_series = cursor.fetchall()
-        conn.close()
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT imdb_id, last_folder_url FROM history "
+                "WHERE media_type = 'series' AND last_folder_url IS NOT NULL AND last_folder_url != ''"
+            )
+            history_series = cursor.fetchall()
 
-        for row in history_series:
+        def _fetch_history_series(row):
             folder_url = row["last_folder_url"]
             episodes = fetch_episodes_from_folder(folder_url)
-            if episodes is None:
-                continue
+            if episodes:
+                sorted_eps = sort_episodes(episodes)
+                if sorted_eps:
+                    latest = ""
+                    for ep in reversed(sorted_eps):
+                        filename = ep.get("filename", "")
+                        if parse_season_episode_tuple(filename):
+                            latest = filename
+                            break
+                    if not latest:
+                        latest = sorted_eps[-1].get("filename", "")
+                    if latest:
+                        self.save_latest_episode(folder_url, latest)
 
-            sorted_eps = sort_episodes(episodes)
-            if sorted_eps:
-                latest = ""
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            executor.map(_fetch_history_series, history_series)
 
-                for ep in reversed(sorted_eps):
-                    filename = ep.get("filename", "")
-                    if parse_season_episode_tuple(filename):
-                        latest = filename
-                        break
-
-                if not latest:
-                    latest = sorted_eps[-1].get("filename", "")
-
-                if latest:
-                    self.save_latest_episode(folder_url, latest)
+        api_key = self.get_omdb_api_key()
+        if api_key:
+            self._prefetch_omdb_metadata(imdb_ids_to_fetch[:100], api_key)
 
         return True
 
+    def _prefetch_omdb_metadata(self, imdb_ids, api_key):
+        session = PosterManager._get_fast_session()
+
+        def _fetch_one(imdb_id):
+            if not imdb_id:
+                return
+            if self.get_cached_poster(imdb_id) is not None:
+                return
+
+            try:
+                res = session.get(
+                    "https://www.omdbapi.com/",
+                    params={"i": imdb_id, "apikey": api_key},
+                    timeout=4,
+                )
+                if res.status_code == 200:
+                    data = res.json()
+                    if data.get("Response") == "True":
+                        poster = data.get("Poster", "N/A")
+                        self.save_poster_cache(imdb_id, poster)
+
+                        raw_seasons = data.get("totalSeasons", "0")
+                        try:
+                            seasons = int(raw_seasons)
+                        except Exception:
+                            seasons = 0
+                        self.save_total_seasons(imdb_id, seasons)
+                    else:
+                        self.save_poster_cache(imdb_id, "N/A")
+                        self.save_total_seasons(imdb_id, 0)
+                else:
+                    self.save_poster_cache(imdb_id, "N/A")
+                    self.save_total_seasons(imdb_id, 0)
+            except Exception:
+                self.save_poster_cache(imdb_id, "N/A")
+                self.save_total_seasons(imdb_id, 0)
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            executor.map(_fetch_one, imdb_ids)
+
     def search(self, query: str) -> list:
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        search_query = f"%{query.lower()}%"
-        cursor.execute(
-            "SELECT * FROM movies "
-            "WHERE LOWER(title_en) LIKE ? OR LOWER(title_fa) LIKE ? "
-            "LIMIT 50",
-            (search_query, search_query),
-        )
-        rows = cursor.fetchall()
-        conn.close()
-        return [dict(row) for row in rows]
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            search_query = f"%{query.lower()}%"
+            cursor.execute(
+                "SELECT * FROM movies WHERE LOWER(title_en) LIKE ? OR LOWER(title_fa) LIKE ? LIMIT 50",
+                (search_query, search_query),
+            )
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
 
     def get_movie(self, imdb_id: str):
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM movies WHERE imdb_id = ?",
-            (imdb_id,),
-        )
-        row = cursor.fetchone()
-        conn.close()
-        return dict(row) if row else None
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM movies WHERE imdb_id = ?", (imdb_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
 
     def get_continue_watching(self) -> list:
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM history "
-            "ORDER BY timestamp DESC LIMIT 10"
-        )
-        rows = cursor.fetchall()
-        conn.close()
-        return [dict(row) for row in rows]
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM history ORDER BY timestamp DESC LIMIT 10")
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
 
     def save_history(self, history_data: dict):
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT OR REPLACE INTO history "
-            "(imdb_id, media_type, title_en, year, "
-            "last_option_label, last_folder_url, last_episode_url, "
-            "last_episode_filename, timestamp) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-            (
-                history_data.get("imdb_id"),
-                history_data.get("media_type"),
-                history_data.get("title_en"),
-                history_data.get("year"),
-                history_data.get("last_option_label"),
-                history_data.get("last_folder_url"),
-                history_data.get("last_episode_url"),
-                history_data.get("last_episode_filename"),
-            ),
-        )
-        conn.commit()
-        conn.close()
-
-    def save_progress(
-        self,
-        url: str,
-        time_pos: float,
-        duration: float = None,
-    ):
-        conn = self._get_conn()
-        cursor = conn.cursor()
-
-        if duration is not None and duration > 0:
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
             cursor.execute(
-                "INSERT OR REPLACE INTO watch_progress "
-                "(media_url, time_pos, duration) VALUES (?, ?, ?)",
-                (url, time_pos, duration),
-            )
-        else:
-            cursor.execute(
-                "SELECT duration FROM watch_progress WHERE media_url = ?",
-                (url,),
-            )
-            row = cursor.fetchone()
-            existing_dur = row["duration"] if row else None
-
-            cursor.execute(
-                "INSERT OR REPLACE INTO watch_progress "
-                "(media_url, time_pos, duration) VALUES (?, ?, ?)",
-                (url, time_pos, existing_dur),
+                "INSERT OR REPLACE INTO history (imdb_id, media_type, title_en, year, "
+                "last_option_label, last_folder_url, last_episode_url, last_episode_filename, timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                (
+                    history_data.get("imdb_id"),
+                    history_data.get("media_type"),
+                    history_data.get("title_en"),
+                    history_data.get("year"),
+                    history_data.get("last_option_label"),
+                    history_data.get("last_folder_url"),
+                    history_data.get("last_episode_url"),
+                    history_data.get("last_episode_filename"),
+                ),
             )
 
-        conn.commit()
-        conn.close()
+    def save_progress(self, url: str, time_pos: float, duration: float = None):
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            if duration is not None and duration > 0:
+                cursor.execute(
+                    "INSERT OR REPLACE INTO watch_progress (media_url, time_pos, duration) VALUES (?, ?, ?)",
+                    (url, time_pos, duration),
+                )
+            else:
+                cursor.execute("SELECT duration FROM watch_progress WHERE media_url = ?", (url,))
+                row = cursor.fetchone()
+                existing_dur = row["duration"] if row else None
+                cursor.execute(
+                    "INSERT OR REPLACE INTO watch_progress (media_url, time_pos, duration) VALUES (?, ?, ?)",
+                    (url, time_pos, existing_dur),
+                )
 
     def get_progress(self, url: str) -> float:
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT time_pos FROM watch_progress WHERE media_url = ?",
-            (url,),
-        )
-        row = cursor.fetchone()
-        conn.close()
-        return row["time_pos"] if row else 0.0
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT time_pos FROM watch_progress WHERE media_url = ?", (url,))
+            row = cursor.fetchone()
+            return row["time_pos"] if row else 0.0
 
     def get_duration(self, url: str) -> float:
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT duration FROM watch_progress WHERE media_url = ?",
-            (url,),
-        )
-        row = cursor.fetchone()
-        conn.close()
-        return row["duration"] if row and row["duration"] else 0.0
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT duration FROM watch_progress WHERE media_url = ?", (url,))
+            row = cursor.fetchone()
+            return row["duration"] if row and row["duration"] else 0.0
 
     @staticmethod
     def _get_robust_session() -> requests.Session:
         session = requests.Session()
-        session.headers.update(
-            {
-                "User-Agent": USER_AGENT,
-            }
-        )
-
-        retries = Retry(
-            total=3,
-            backoff_factor=1,
-            status_forcelist=[500, 502, 503, 504],
-        )
+        session.headers.update({"User-Agent": USER_AGENT})
+        retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
         adapter = HTTPAdapter(max_retries=retries)
         session.mount("https://", adapter)
         session.mount("http://", adapter)
-
         return session
 
 
 class PosterManager:
     def __init__(self, db: DatabaseManager):
         self.db = db
-        self.session = self._get_fast_session()
         self.api_key = self.db.get_omdb_api_key()
-        self.failed = set()
-        self.season_failed = set()
 
     def reload_api_key(self):
         self.api_key = self.db.get_omdb_api_key()
-        self.failed.clear()
-        self.season_failed.clear()
 
     def get_poster_url(self, imdb_id: str) -> str:
-        if not imdb_id or imdb_id in self.failed:
+        if not imdb_id:
             return ""
 
         cached = self.db.get_cached_poster(imdb_id)
         if cached is not None:
-            return "" if cached == "N/A" else cached
-
-        if not self.api_key:
-            return ""
-
-        try:
-            response = self.session.get(
-                "https://www.omdbapi.com/",
-                params={"i": imdb_id, "apikey": self.api_key},
-                timeout=3,
-            )
-            response.raise_for_status()
-            data = response.json()
-
-            poster_url = data.get("Poster", "")
-
-            if data.get("Response") == "True" and poster_url:
-                if poster_url != "N/A":
-                    self.db.save_poster_cache(imdb_id, poster_url)
-                    return poster_url
-
-            self.failed.add(imdb_id)
-        except Exception:
-            self.failed.add(imdb_id)
+            return "" if cached in ("N/A", "") else cached
 
         return ""
 
     def get_total_seasons(self, imdb_id: str):
-        if not imdb_id or imdb_id in self.season_failed:
+        if not imdb_id:
             return None
 
         cached = self.db.get_cached_total_seasons(imdb_id)
-        if cached is not None:
-            if cached > 0:
-                return cached
-            return None
-
-        if not self.api_key:
-            return None
-
-        try:
-            response = self.session.get(
-                "https://www.omdbapi.com/",
-                params={"i": imdb_id, "apikey": self.api_key},
-                timeout=3,
-            )
-            response.raise_for_status()
-            data = response.json()
-
-            if data.get("Response") == "True":
-                raw = data.get("totalSeasons", "")
-
-                if raw and raw != "N/A":
-                    try:
-                        total = int(str(raw).strip())
-                    except Exception:
-                        total = 0
-
-                    if total > 0:
-                        self.db.save_total_seasons(imdb_id, total)
-                        return total
-
-                self.db.save_total_seasons(imdb_id, 0)
-                return None
-
-            self.season_failed.add(imdb_id)
-        except Exception:
-            self.season_failed.add(imdb_id)
+        if cached is not None and cached > 0:
+            return cached
 
         return None
 
     @staticmethod
     def _get_fast_session() -> requests.Session:
         session = requests.Session()
-        session.headers.update(
-            {
-                "User-Agent": USER_AGENT,
-            }
-        )
-
-        retries = Retry(
-            total=1,
-            backoff_factor=0.2,
-            status_forcelist=[500, 502, 503, 504],
-        )
+        session.headers.update({"User-Agent": USER_AGENT})
+        retries = Retry(total=1, backoff_factor=0.2, status_forcelist=[500, 502, 503, 504])
         adapter = HTTPAdapter(max_retries=retries)
         session.mount("https://", adapter)
         session.mount("http://", adapter)
-
         return session
 
 
@@ -655,12 +531,7 @@ class PlayerManager:
         self.current_duration = 0.0
         self.on_error = None
 
-    def play(
-        self,
-        url: str,
-        start_time: float = 0.0,
-        referer: str = None,
-    ):
+    def play(self, url: str, start_time: float = 0.0, referer: str = None):
         try:
             if HAS_PYTHON_MPV:
                 self._play_with_python_mpv(url, start_time, referer)
@@ -672,12 +543,7 @@ class PlayerManager:
             if self.on_error:
                 self.on_error(message)
 
-    def _play_with_python_mpv(
-        self,
-        url: str,
-        start_time: float,
-        referer: str = None,
-    ):
+    def _play_with_python_mpv(self, url: str, start_time: float, referer: str = None):
         self.current_time_pos = 0.0
         self.current_duration = 0.0
 
@@ -710,25 +576,14 @@ class PlayerManager:
         player.wait_for_playback()
 
         if self.current_duration <= 0:
-            logger.warning(
-                "python-mpv duration is 0; stream may have failed to open"
-            )
+            logger.warning("python-mpv duration is 0; stream may have failed to open")
 
         if self.current_time_pos > 5:
-            self.db.save_progress(
-                url,
-                self.current_time_pos,
-                self.current_duration,
-            )
+            self.db.save_progress(url, self.current_time_pos, self.current_duration)
 
         player.terminate()
 
-    def _play_with_subprocess(
-        self,
-        url: str,
-        start_time: float,
-        referer: str = None,
-    ):
+    def _play_with_subprocess(self, url: str, start_time: float, referer: str = None):
         if referer is None:
             referer = url.rsplit("/", 1)[0] + "/"
 
@@ -770,17 +625,8 @@ def format_time(seconds: float) -> str:
 def fetch_episodes_from_folder(folder_url: str):
     try:
         base = folder_url.rstrip("/") + "/"
-        logger.info("fetching episodes from: %s", base)
-
         session = DatabaseManager._get_robust_session()
         res = session.get(base, timeout=15)
-
-        logger.debug(
-            "fetch episodes: HTTP %s content_len=%s",
-            res.status_code,
-            len(res.text),
-        )
-
         res.raise_for_status()
 
         soup = BeautifulSoup(res.text, "html.parser")
@@ -788,7 +634,6 @@ def fetch_episodes_from_folder(folder_url: str):
 
         for a in soup.find_all("a"):
             href = a.get("href", "")
-
             if not href.lower().endswith((".mkv", ".mp4", ".avi")):
                 continue
 
@@ -798,7 +643,6 @@ def fetch_episodes_from_folder(folder_url: str):
                 url = base + href.lstrip("/")
 
             filename = a.text.strip()
-
             episodes.append(
                 {
                     "filename": filename,
@@ -807,7 +651,6 @@ def fetch_episodes_from_folder(folder_url: str):
                 }
             )
 
-        logger.info("found %s episode links", len(episodes))
         return episodes
     except Exception:
         logger.exception("fetch episodes failed: %s", folder_url)
@@ -816,7 +659,6 @@ def fetch_episodes_from_folder(folder_url: str):
 
 def _extract_size(a_tag):
     sibling = a_tag.next_sibling
-
     if sibling is not None and isinstance(sibling, str):
         match = SIZE_PATTERN.search(sibling)
         if match:
@@ -835,26 +677,13 @@ def sort_episodes(episodes):
     def key(ep):
         filename = ep.get("filename", "")
 
-        match = re.search(
-            r"[Ss](\d{1,2})\s*[Ee](\d{1,2})",
-            filename,
-        )
+        match = re.search(r"[Ss](\d{1,2})\s*[Ee](\d{1,2})", filename)
         if match:
-            return (
-                0,
-                int(match.group(1)),
-                int(match.group(2)),
-                filename,
-            )
+            return (0, int(match.group(1)), int(match.group(2)), filename)
 
         match = re.search(r"(\d{1,2})x(\d{1,2})", filename)
         if match:
-            return (
-                0,
-                int(match.group(1)),
-                int(match.group(2)),
-                filename,
-            )
+            return (0, int(match.group(1)), int(match.group(2)), filename)
 
         return (1, 0, 0, filename)
 
